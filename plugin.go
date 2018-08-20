@@ -25,7 +25,7 @@ type IstioServiceEntries struct {
 	configStore model.IstioConfigStore
 	mapMutex    sync.RWMutex
 	stop        chan struct{}
-	dnsEntries  map[string]net.IP
+	dnsEntries  map[string][]net.IP
 }
 
 func main() {
@@ -67,33 +67,69 @@ func main() {
 
 func (h *IstioServiceEntries) readServiceEntries() {
 	//log.Printf("Reading service entries at %v\n", time.Now())
-	dnsEntries := make(map[string]net.IP)
+	dnsEntries := make(map[string][]net.IP)
 	serviceEntries := h.configStore.ServiceEntries()
 	//log.Printf("Have %d service entries\n", len(serviceEntries))
 	for _, e := range serviceEntries {
 		entry := e.Spec.(*networking.ServiceEntry)
-		if entry.Resolution == networking.ServiceEntry_NONE {
+		if model.ValidateServiceEntry(e.Name, e.Namespace, entry) != nil {
+			// ignore invalid service entries
 			continue
 		}
-		if len(entry.Addresses) == 0 || len(entry.Addresses) > 1 {
+
+		if entry.Resolution == networking.ServiceEntry_NONE || len(entry.Addresses) == 0 {
+			// NO DNS based service discovery for service entries
+			// that specify NONE as the resolution. NONE implies
+			// that Istio should use the IP provided by the caller
 			continue
 		}
+
+		vips := convertToVIPs(entry.Addresses)
+		if len(vips) == 0 {
+			continue
+		}
+
 		for _, host := range entry.Hosts {
-			// TODO: support wildcards here and in resolution
-			// TODO: support IPv6
+			key := fmt.Sprintf("%s.", host)
 			if strings.Contains(host, "*") {
-				continue
+				// Validation will ensure that the host is of the form *.foo.com
+				parts := strings.SplitN(host, ".", 2)
+				// Prefix wildcards with a . so that we can distinguish these entries in the map
+				key = fmt.Sprintf(".%s.", parts[1])
 			}
-			dnsEntries[fmt.Sprintf("%s.", host)] = net.ParseIP(entry.Addresses[0])
+			dnsEntries[key] = vips
 		}
 	}
 	h.mapMutex.Lock()
-	h.dnsEntries = make(map[string]net.IP)
+	h.dnsEntries = make(map[string][]net.IP)
 	for k, v := range dnsEntries {
 		h.dnsEntries[k] = v
 	}
 	h.mapMutex.Unlock()
 	//log.Printf("Found %d service entries and have %v\n", len(serviceEntries), h.dnsEntries)
+}
+
+func convertToVIPs(addresses []string) []net.IP {
+	vips := make([]net.IP, 0)
+
+	for _, address := range addresses {
+		// check if its CIDR.  If so, reject the address unless its /32 CIDR
+		if strings.Contains(address, "/") {
+			if ip, network, err := net.ParseCIDR(address); err != nil {
+				ones, bits := network.Mask.Size()
+				if ones == bits {
+					// its a full mask (e.g., /32). Effectively an IP
+					vips = append(vips, ip)
+				}
+			}
+		} else {
+			if ip := net.ParseIP(address); ip != nil {
+				vips = append(vips, ip)
+			}
+		}
+	}
+
+	return vips
 }
 
 // code based on https://github.com/ahmetb/coredns-grpc-backend-sample
@@ -111,17 +147,29 @@ func (h *IstioServiceEntries) Query(ctx context.Context, in *dnsapi.DnsPacket) (
 	for _, q := range request.Question {
 		switch q.Qtype {
 		case dns.TypeA:
-			var ip net.IP
+			var vips []net.IP
 			//log.Printf("Query A record: %s->%v\n", q.Name, q)
 			h.mapMutex.RLock()
 			//log.Printf("DNS map: %v\n", h.dnsEntries)
 			if h.dnsEntries != nil {
-				ip = h.dnsEntries[q.Name]
+				vips = h.dnsEntries[q.Name]
+				if vips == nil {
+					// check for wildcard format
+					// Split name into pieces by . (remember that DNS queries have dot in the end as well)
+					// Check for each smaller variant of the name, until we have
+					pieces := strings.Split(q.Name, ".")
+					pieces = pieces[1:]
+					for ; len(pieces) > 2; pieces = pieces[1:] {
+						if vips = h.dnsEntries[fmt.Sprintf(".%s", strings.Join(pieces, "."))]; vips != nil {
+							break
+						}
+					}
+				}
 			}
 			h.mapMutex.RUnlock()
-			if ip != nil {
+			if vips != nil {
 				//log.Printf("Found %s->%v\n", q.Name, ip)
-				response.Answer = a(q.Name, []net.IP{ip})
+				response.Answer = a(q.Name, vips)
 			}
 			//default:
 			//	log.Printf("Unknown query type: %v\n", q)
