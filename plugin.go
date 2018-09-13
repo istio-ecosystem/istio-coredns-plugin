@@ -11,7 +11,7 @@ import (
 	"time"
 
 	"github.com/miekg/dns"
-	dnsapi "github.com/rshriram/istio-coredns-plugin/api"
+	dnsapi "github.com/istio-ecosystem/istio-coredns-plugin/api"
 
 	networking "istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/config/kube/crd"
