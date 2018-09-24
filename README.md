@@ -39,3 +39,29 @@ $ dig +short @<coreDNSIP> A mail.google.com
 $ dig +short @<coreDNSIP> A google.com
  # no response
 ```
+
+## Usage
+
+Deploy the core-DNS service in the istio-system namespace
+
+```
+kubectl apply -f coredns.yaml
+```
+
+Update the kube-dns config map to point to this coredns service as the
+upstream DNS service for the `*.global` domain. You will have to find out
+the cluster IP of coredns service and update the config map (or write a
+controller for this purpose!).
+
+E.g.
+
+```yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kube-dns
+  namespace: kube-system
+data:
+  stubDomains: |
+    {"global": ["10.2.3.4"]}
+```

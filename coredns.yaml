@@ -41,7 +41,7 @@ data:
     .:53 {
         errors
         health
-        proxy __BEGIN__ .FederationDomain __END__ 127.0.0.1:8053 {
+        proxy global 127.0.0.1:8053 {
           protocol grpc insecure
         }
         prometheus :9153
