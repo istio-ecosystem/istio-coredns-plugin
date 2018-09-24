@@ -72,7 +72,8 @@ func (h *IstioServiceEntries) readServiceEntries() {
 	//log.Printf("Have %d service entries\n", len(serviceEntries))
 	for _, e := range serviceEntries {
 		entry := e.Spec.(*networking.ServiceEntry)
-		if model.ValidateServiceEntry(e.Name, e.Namespace, entry) != nil {
+		if errs := model.ValidateServiceEntry(e.Name, e.Namespace, entry); errs != nil {
+			// log.Printf("Ignoring invalid service entry: %s.%s - %v\n", e.Name, e.Namespace, errs)
 			// ignore invalid service entries
 			continue
 		}
@@ -103,6 +104,7 @@ func (h *IstioServiceEntries) readServiceEntries() {
 	h.mapMutex.Lock()
 	h.dnsEntries = make(map[string][]net.IP)
 	for k, v := range dnsEntries {
+		// log.Printf("adding DNS mapping: %s->%v\n", k, v)
 		h.dnsEntries[k] = v
 	}
 	h.mapMutex.Unlock()
