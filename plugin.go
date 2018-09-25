@@ -66,14 +66,14 @@ func main() {
 }
 
 func (h *IstioServiceEntries) readServiceEntries() {
-	//log.Printf("Reading service entries at %v\n", time.Now())
+	log.Printf("Reading service entries at %v\n", time.Now())
 	dnsEntries := make(map[string][]net.IP)
 	serviceEntries := h.configStore.ServiceEntries()
-	//log.Printf("Have %d service entries\n", len(serviceEntries))
+	log.Printf("Have %d service entries\n", len(serviceEntries))
 	for _, e := range serviceEntries {
 		entry := e.Spec.(*networking.ServiceEntry)
 		if errs := model.ValidateServiceEntry(e.Name, e.Namespace, entry); errs != nil {
-			// log.Printf("Ignoring invalid service entry: %s.%s - %v\n", e.Name, e.Namespace, errs)
+			log.Printf("Ignoring invalid service entry: %s.%s - %v\n", e.Name, e.Namespace, errs)
 			// ignore invalid service entries
 			continue
 		}
@@ -104,7 +104,7 @@ func (h *IstioServiceEntries) readServiceEntries() {
 	h.mapMutex.Lock()
 	h.dnsEntries = make(map[string][]net.IP)
 	for k, v := range dnsEntries {
-		// log.Printf("adding DNS mapping: %s->%v\n", k, v)
+		log.Printf("adding DNS mapping: %s->%v\n", k, v)
 		h.dnsEntries[k] = v
 	}
 	h.mapMutex.Unlock()
@@ -145,12 +145,12 @@ func (h *IstioServiceEntries) Query(ctx context.Context, in *dnsapi.DnsPacket) (
 	response.SetReply(request)
 	response.Authoritative = true
 
-	//log.Println("DNS query ", request)
+	log.Println("DNS query ", request)
 	for _, q := range request.Question {
 		switch q.Qtype {
 		case dns.TypeA:
 			var vips []net.IP
-			//log.Printf("Query A record: %s->%v\n", q.Name, q)
+			log.Printf("Query A record: %s->%v\n", q.Name, q)
 			h.mapMutex.RLock()
 			//log.Printf("DNS map: %v\n", h.dnsEntries)
 			if h.dnsEntries != nil {
@@ -170,7 +170,7 @@ func (h *IstioServiceEntries) Query(ctx context.Context, in *dnsapi.DnsPacket) (
 			}
 			h.mapMutex.RUnlock()
 			if vips != nil {
-				//log.Printf("Found %s->%v\n", q.Name, ip)
+				log.Printf("Found %s->%v\n", q.Name, ip)
 				response.Answer = a(q.Name, vips)
 			}
 			//default:
@@ -178,7 +178,7 @@ func (h *IstioServiceEntries) Query(ctx context.Context, in *dnsapi.DnsPacket) (
 		}
 	}
 	if len(response.Answer) == 0 {
-		//log.Println("Could not find the service requested")
+		log.Println("Could not find the service requested")
 		response.Rcode = dns.RcodeNameError
 	}
 
