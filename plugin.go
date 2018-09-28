@@ -78,14 +78,21 @@ func (h *IstioServiceEntries) readServiceEntries() {
 			continue
 		}
 
-		if entry.Resolution == networking.ServiceEntry_NONE || len(entry.Addresses) == 0 {
+		if entry.Resolution == networking.ServiceEntry_NONE {
 			// NO DNS based service discovery for service entries
 			// that specify NONE as the resolution. NONE implies
 			// that Istio should use the IP provided by the caller
 			continue
 		}
 
-		vips := convertToVIPs(entry.Addresses)
+		addresses := entry.Addresses
+		if len(addresses) == 0 {
+			// If the ServiceEntry has no Addresses, just map to a
+			// fake value; effectively minting a VIP
+			addresses = []string{"42.0.0.69"}
+		}
+
+		vips := convertToVIPs(addresses)
 		if len(vips) == 0 {
 			continue
 		}
