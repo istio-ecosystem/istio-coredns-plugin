@@ -170,7 +170,7 @@ func (h *IstioServiceEntries) Query(ctx context.Context, in *dnsapi.DnsPacket) (
 			}
 			h.mapMutex.RUnlock()
 			if vips != nil {
-				log.Printf("Found %s->%v\n", q.Name, ip)
+				log.Printf("Found %s->%v\n", q.Name, vips)
 				response.Answer = a(q.Name, vips)
 			}
 			//default:
