@@ -10,8 +10,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/miekg/dns"
 	dnsapi "github.com/istio-ecosystem/istio-coredns-plugin/api"
+	"github.com/miekg/dns"
 
 	networking "istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/config/kube/crd"
