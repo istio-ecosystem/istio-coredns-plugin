@@ -89,7 +89,7 @@ func (h *IstioServiceEntries) readServiceEntries() {
 		if len(addresses) == 0 {
 			// If the ServiceEntry has no Addresses, just map to a
 			// fake value; effectively minting a VIP
-			addresses = []string{"42.0.0.69"}
+			addresses = []string{"127.255.127.127"}
 		}
 
 		vips := convertToVIPs(addresses)
