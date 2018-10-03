@@ -5,8 +5,12 @@ CoreDNS gRPC plugin to serve DNS records out of Istio ServiceEntries.
 The plugin runs as a separate container in the CoreDNS pod, serving DNS A
 records over gRPC to CoreDNS.
 
-Hosts in the service entries with the respective address specified in the
-service entry if the address is a non CIDR address.
+Hosts in service entries which also contain addresses will resolve to those
+addresses, as long as they're host addresses not CIDR ranges.
+
+Service entries without addresses will by default not resolve, unless the
+--default-address flag is given, in which case that address will be used
+for address-less service entries.
 
 Wildcard hosts in the service entries will also resolve appropriately.
 E.g., consider the following service entry:
