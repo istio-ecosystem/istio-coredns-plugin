@@ -32,6 +32,8 @@ func main() {
 	// This is not working. Only in-cluster config works
 	kubeconfig := flag.String("kubeconfig", "", "path to kube config")
 	kubecontext := flag.String("context", "", "kube context to use")
+	vip := flag.String("default-address", "", "default value for A record, iff ServiceEntry has no Addresses")
+
 	flag.Parse()
 
 	h, err := NewIstioHandle(*kubeconfig, *kubecontext)
@@ -39,7 +41,7 @@ func main() {
 		log.Fatalf("Failed to initialize Istio CRD watcher: %v", err)
 	}
 
-	h.readServiceEntries()
+	h.readServiceEntries(*vip)
 	stop := make(chan bool)
 	go func() {
 		ticker := time.NewTicker(5 * time.Second)
@@ -48,7 +50,7 @@ func main() {
 			case <-stop:
 				return
 			case <-ticker.C:
-				h.readServiceEntries()
+				h.readServiceEntries(*vip)
 			}
 		}
 	}()
@@ -65,7 +67,7 @@ func main() {
 	close(h.stop)
 }
 
-func (h *IstioServiceEntries) readServiceEntries() {
+func (h *IstioServiceEntries) readServiceEntries(vip string) {
 	log.Printf("Reading service entries at %v\n", time.Now())
 	dnsEntries := make(map[string][]net.IP)
 	serviceEntries := h.configStore.ServiceEntries()
@@ -86,10 +88,9 @@ func (h *IstioServiceEntries) readServiceEntries() {
 		}
 
 		addresses := entry.Addresses
-		if len(addresses) == 0 {
-			// If the ServiceEntry has no Addresses, just map to a
-			// fake value; effectively minting a VIP
-			addresses = []string{"127.255.127.127"}
+		if len(addresses) == 0 && vip != "" {
+			// If the ServiceEntry has no Addresses, map to a user-supplied default value, if provided
+			addresses = []string{vip}
 		}
 
 		vips := convertToVIPs(addresses)
