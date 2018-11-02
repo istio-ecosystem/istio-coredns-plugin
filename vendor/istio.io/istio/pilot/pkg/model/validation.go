@@ -27,7 +27,7 @@ import (
 
 	"github.com/gogo/protobuf/proto"
 	"github.com/gogo/protobuf/types"
-	multierror "github.com/hashicorp/go-multierror"
+	"github.com/hashicorp/go-multierror"
 
 	authn "istio.io/api/authentication/v1alpha1"
 	meshconfig "istio.io/api/mesh/v1alpha1"
@@ -49,9 +49,6 @@ const (
 
 // Constants for duration fields
 const (
-	discoveryRefreshDelayMax = time.Minute * 10
-	discoveryRefreshDelayMin = time.Second
-
 	connectTimeoutMax = time.Second * 30
 	connectTimeoutMin = time.Millisecond
 
@@ -303,13 +300,10 @@ func ValidateMixerService(svc *mccpb.IstioService) (errs error) {
 	return
 }
 
-// ValidateHTTPHeaderName checks that the name is lower-case
+// ValidateHTTPHeaderName validates a header name
 func ValidateHTTPHeaderName(name string) error {
 	if name == "" {
 		return fmt.Errorf("header name cannot be empty")
-	}
-	if strings.ToLower(name) != name {
-		return fmt.Errorf("must be in lower case")
 	}
 	return nil
 }
@@ -320,6 +314,19 @@ func ValidatePercent(val int32) error {
 		return fmt.Errorf("percentage %v is not in range 0..100", val)
 	}
 	return nil
+}
+
+// validatePercentageOrDefault checks if the specified fractional percentage is
+// valid. If a nil fractional percentage is supplied, it validates the default
+// integer percent value.
+func validatePercentageOrDefault(percentage *networking.Percent, defaultPercent int32) error {
+	if percentage != nil {
+		if percentage.Value < 0.0 || percentage.Value > 100.0 || (percentage.Value > 0.0 && percentage.Value < 0.0001) {
+			return fmt.Errorf("percentage %v is neither 0.0, nor in range [0.0001, 100.0]", percentage.Value)
+		}
+		return nil
+	}
+	return ValidatePercent(defaultPercent)
 }
 
 // ValidateIPv4Subnet checks that a string is in "CIDR notation" or "Dot-decimal notation"
@@ -389,10 +396,12 @@ func ValidateGateway(name, namespace string, msg proto.Message) (errs error) {
 	portNames := make(map[string]bool)
 
 	for _, s := range value.Servers {
-		if portNames[s.Port.Name] {
-			errs = appendErrors(errs, fmt.Errorf("port names in servers must be unique: duplicate name %s", s.Port.Name))
+		if s.Port != nil {
+			if portNames[s.Port.Name] {
+				errs = appendErrors(errs, fmt.Errorf("port names in servers must be unique: duplicate name %s", s.Port.Name))
+			}
+			portNames[s.Port.Name] = true
 		}
-		portNames[s.Port.Name] = true
 	}
 
 	return errs
@@ -603,7 +612,19 @@ func validateLoadBalancer(settings *networking.LoadBalancerSettings) (errs error
 	}
 
 	// simple load balancing is always valid
-	// TODO: settings.GetConsistentHash()
+
+	consistentHash := settings.GetConsistentHash()
+	if consistentHash != nil {
+		httpCookie := consistentHash.GetHttpCookie()
+		if httpCookie != nil {
+			if httpCookie.Name == "" {
+				errs = appendErrors(errs, fmt.Errorf("name required for HttpCookie"))
+			}
+			if httpCookie.Ttl == nil {
+				errs = appendErrors(errs, fmt.Errorf("ttl required for HttpCookie"))
+			}
+		}
+	}
 
 	return
 }
@@ -762,15 +783,27 @@ func ValidateParentAndDrain(drainTime, parentShutdown *types.Duration) (errs err
 	return
 }
 
-// ValidateRefreshDelay validates the discovery refresh delay time
-func ValidateRefreshDelay(refresh *types.Duration) error {
-	if err := ValidateDuration(refresh); err != nil {
-		return err
+// ValidateLightstepCollector validates the configuration for sending envoy spans to LightStep
+func ValidateLightstepCollector(ls *meshconfig.Tracing_Lightstep) error {
+	var errs error
+	if ls.GetAddress() == "" {
+		errs = multierror.Append(errs, errors.New("address is required"))
 	}
+	if err := ValidateProxyAddress(ls.GetAddress()); err != nil {
+		errs = multierror.Append(errs, multierror.Prefix(err, "invalid lightstep address:"))
+	}
+	if ls.GetAccessToken() == "" {
+		errs = multierror.Append(errs, errors.New("access token is required"))
+	}
+	if ls.GetSecure() && (ls.GetCacertPath() == "") {
+		errs = multierror.Append(errs, errors.New("cacertPath is required"))
+	}
+	return errs
+}
 
-	refreshDuration, _ := types.DurationFromProto(refresh)
-	err := ValidateDurationRange(refreshDuration, discoveryRefreshDelayMin, discoveryRefreshDelayMax)
-	return err
+// ValidateZipkinCollector validates the configuration for sending envoy spans to Zipkin
+func ValidateZipkinCollector(z *meshconfig.Tracing_Zipkin) error {
+	return ValidateProxyAddress(z.GetAddress())
 }
 
 // ValidateConnectTimeout validates the envoy conncection timeout
@@ -806,14 +839,6 @@ func ValidateMeshConfig(mesh *meshconfig.MeshConfig) (errs error) {
 		errs = multierror.Append(errs, multierror.Prefix(err, "invalid connect timeout:"))
 	}
 
-	if err := ValidateRefreshDelay(mesh.RdsRefreshDelay); err != nil {
-		errs = multierror.Append(errs, multierror.Prefix(err, "invalid rds refresh delay:"))
-	}
-
-	if err := ValidateRefreshDelay(mesh.SdsRefreshDelay); err != nil {
-		errs = multierror.Append(errs, multierror.Prefix(err, "invalid sds refresh delay:"))
-	}
-
 	if mesh.DefaultConfig == nil {
 		errs = multierror.Append(errs, errors.New("missing default config"))
 	} else if err := ValidateProxyConfig(mesh.DefaultConfig); err != nil {
@@ -841,10 +866,6 @@ func ValidateProxyConfig(config *meshconfig.ProxyConfig) (errs error) {
 		errs = multierror.Append(errs, multierror.Prefix(err, "invalid parent and drain time combination"))
 	}
 
-	if err := ValidateRefreshDelay(config.DiscoveryRefreshDelay); err != nil {
-		errs = multierror.Append(errs, multierror.Prefix(err, "invalid refresh delay:"))
-	}
-
 	// discovery address is mandatory since mutual TLS relies on CDS.
 	// strictly speaking, proxies can operate without RDS/CDS and with hot restarts
 	// but that requires additional test validation
@@ -854,9 +875,15 @@ func ValidateProxyConfig(config *meshconfig.ProxyConfig) (errs error) {
 		errs = multierror.Append(errs, multierror.Prefix(err, "invalid discovery address:"))
 	}
 
-	if config.ZipkinAddress != "" {
-		if err := ValidateProxyAddress(config.ZipkinAddress); err != nil {
-			errs = multierror.Append(errs, multierror.Prefix(err, "invalid zipkin address:"))
+	if tracer := config.GetTracing().GetLightstep(); tracer != nil {
+		if err := ValidateLightstepCollector(tracer); err != nil {
+			errs = multierror.Append(errs, multierror.Prefix(err, "invalid lightstep config:"))
+		}
+	}
+
+	if tracer := config.GetTracing().GetZipkin(); tracer != nil {
+		if err := ValidateZipkinCollector(tracer); err != nil {
+			errs = multierror.Append(errs, multierror.Prefix(err, "invalid zipkin config:"))
 		}
 	}
 
@@ -1159,9 +1186,6 @@ func ValidateServiceRole(name, namespace string, msg proto.Message) error {
 		if len(rule.Services) == 0 {
 			errs = appendErrors(errs, fmt.Errorf("at least 1 service must be specified for rule %d", i))
 		}
-		if len(rule.Methods) == 0 {
-			errs = appendErrors(errs, fmt.Errorf("at least 1 method must be specified for rule %d", i))
-		}
 		for j, constraint := range rule.Constraints {
 			if len(constraint.Key) == 0 {
 				errs = appendErrors(errs, fmt.Errorf("key cannot be empty for constraint %d in rule %d", j, i))
@@ -1204,15 +1228,14 @@ func ValidateServiceRoleBinding(name, namespace string, msg proto.Message) error
 	return errs
 }
 
-// ValidateRbacConfig checks that RbacConfig is well-formed.
-func ValidateRbacConfig(name, namespace string, msg proto.Message) error {
+func checkRbacConfig(name, typ string, msg proto.Message) error {
 	in, ok := msg.(*rbac.RbacConfig)
 	if !ok {
-		return errors.New("cannot cast to RbacConfig")
+		return errors.New("cannot cast to " + typ)
 	}
 
 	if name != DefaultRbacConfigName {
-		return fmt.Errorf("rbacConfig has invalid name(%s), name must be %s", name, DefaultRbacConfigName)
+		return fmt.Errorf("%s has invalid name(%s), name must be %q", typ, name, DefaultRbacConfigName)
 	}
 
 	if in.Mode == rbac.RbacConfig_ON_WITH_INCLUSION && in.Inclusion == nil {
@@ -1224,6 +1247,17 @@ func ValidateRbacConfig(name, namespace string, msg proto.Message) error {
 	}
 
 	return nil
+}
+
+// ValidateClusterRbacConfig checks that ClusterRbacConfig is well-formed.
+func ValidateClusterRbacConfig(name, namespace string, msg proto.Message) error {
+	return checkRbacConfig(name, "ClusterRbacConfig", msg)
+}
+
+// ValidateRbacConfig checks that RbacConfig is well-formed.
+func ValidateRbacConfig(name, namespace string, msg proto.Message) error {
+	log.Warnf("RbacConfig is deprecated, use ClusterRbacConfig instead.")
+	return checkRbacConfig(name, "RbacConfig", msg)
 }
 
 func validateJwt(jwt *authn.Jwt) (errs error) {
@@ -1334,7 +1368,7 @@ func ValidateVirtualService(name, namespace string, msg proto.Message) (errs err
 		errs = appendErrors(errs, validateHTTPRoute(httpRoute))
 	}
 	for _, tlsRoute := range virtualService.Tls {
-		errs = appendErrors(errs, validateTLSRoute(tlsRoute))
+		errs = appendErrors(errs, validateTLSRoute(tlsRoute, virtualService))
 	}
 	for _, tcpRoute := range virtualService.Tcp {
 		errs = appendErrors(errs, validateTCPRoute(tcpRoute))
@@ -1343,28 +1377,32 @@ func ValidateVirtualService(name, namespace string, msg proto.Message) (errs err
 	return
 }
 
-func validateTLSRoute(tls *networking.TLSRoute) (errs error) {
+func validateTLSRoute(tls *networking.TLSRoute, context *networking.VirtualService) (errs error) {
 	if tls == nil {
 		return nil
 	}
-
 	if len(tls.Match) == 0 {
 		errs = appendErrors(errs, errors.New("TLS route must have at least one match condition"))
 	}
 	for _, match := range tls.Match {
-		errs = appendErrors(errs, validateTLSMatch(match))
+		errs = appendErrors(errs, validateTLSMatch(match, context))
 	}
-	if len(tls.Route) != 1 {
-		errs = appendErrors(errs, errors.New("TLS route must have exactly one destination"))
-	}
-	errs = appendErrors(errs, validateDestinationWeights(tls.Route))
+	errs = appendErrors(errs, validateRouteDestinations(tls.Route))
 	return
 }
 
-func validateTLSMatch(match *networking.TLSMatchAttributes) (errs error) {
+func validateTLSMatch(match *networking.TLSMatchAttributes, context *networking.VirtualService) (errs error) {
 	if len(match.SniHosts) == 0 {
 		errs = appendErrors(errs, fmt.Errorf("TLS match must have at least one SNI host"))
+	} else {
+		for _, sniHost := range match.SniHosts {
+			err := validateSniHost(sniHost, context)
+			if err != nil {
+				errs = appendErrors(errs, err)
+			}
+		}
 	}
+
 	for _, destinationSubnet := range match.DestinationSubnets {
 		errs = appendErrors(errs, ValidateIPv4Subnet(destinationSubnet))
 	}
@@ -1377,6 +1415,21 @@ func validateTLSMatch(match *networking.TLSMatchAttributes) (errs error) {
 	return
 }
 
+func validateSniHost(sniHost string, context *networking.VirtualService) error {
+	err := ValidateWildcardDomain(sniHost)
+	if err != nil {
+		return err
+	}
+	sniHostname := Hostname(sniHost)
+	for _, host := range context.Hosts {
+		if sniHostname.SubsetOf(Hostname(host)) {
+			return nil
+		}
+	}
+	err = fmt.Errorf("SNI host is not a compatible subset of the virtual service hosts: %s", sniHost)
+	return err
+}
+
 func validateTCPRoute(tcp *networking.TCPRoute) (errs error) {
 	if tcp == nil {
 		return nil
@@ -1384,10 +1437,7 @@ func validateTCPRoute(tcp *networking.TCPRoute) (errs error) {
 	for _, match := range tcp.Match {
 		errs = appendErrors(errs, validateTCPMatch(match))
 	}
-	if len(tcp.Route) != 1 {
-		errs = appendErrors(errs, errors.New("TCP route must have exactly one destination"))
-	}
-	errs = appendErrors(errs, validateDestinationWeights(tcp.Route))
+	errs = appendErrors(errs, validateRouteDestinations(tcp.Route))
 	return
 }
 
@@ -1395,7 +1445,6 @@ func validateTCPMatch(match *networking.L4MatchAttributes) (errs error) {
 	for _, destinationSubnet := range match.DestinationSubnets {
 		errs = appendErrors(errs, ValidateIPv4Subnet(destinationSubnet))
 	}
-
 	if len(match.SourceSubnet) > 0 {
 		errs = appendErrors(errs, ValidateIPv4Subnet(match.SourceSubnet))
 	}
@@ -1432,6 +1481,18 @@ func validateHTTPRoute(http *networking.HTTPRoute) (errs error) {
 	for name := range http.AppendHeaders {
 		errs = appendErrors(errs, ValidateHTTPHeaderName(name))
 	}
+	for _, name := range http.AppendRequestHeaders {
+		errs = appendErrors(errs, ValidateHTTPHeaderName(name))
+	}
+	for _, name := range http.RemoveRequestHeaders {
+		errs = appendErrors(errs, ValidateHTTPHeaderName(name))
+	}
+	for _, name := range http.AppendResponseHeaders {
+		errs = appendErrors(errs, ValidateHTTPHeaderName(name))
+	}
+	for _, name := range http.RemoveResponseHeaders {
+		errs = appendErrors(errs, ValidateHTTPHeaderName(name))
+	}
 	errs = appendErrors(errs, validateCORSPolicy(http.CorsPolicy))
 	errs = appendErrors(errs, validateHTTPFaultInjection(http.Fault))
 
@@ -1450,7 +1511,7 @@ func validateHTTPRoute(http *networking.HTTPRoute) (errs error) {
 	errs = appendErrors(errs, validateHTTPRedirect(http.Redirect))
 	errs = appendErrors(errs, validateHTTPRetry(http.Retries))
 	errs = appendErrors(errs, validateHTTPRewrite(http.Rewrite))
-	errs = appendErrors(errs, validateDestinationWeights(http.Route))
+	errs = appendErrors(errs, validateHTTPRouteDestinations(http.Route))
 	if http.Timeout != nil {
 		errs = appendErrors(errs, ValidateDurationGogo(http.Timeout))
 	}
@@ -1467,11 +1528,23 @@ func validateGatewayNames(gateways []string) (errs error) {
 	return
 }
 
-func validateDestinationWeights(weights []*networking.DestinationWeight) (errs error) {
+func validateHTTPRouteDestinations(weights []*networking.HTTPRouteDestination) (errs error) {
 	var totalWeight int32
 	for _, weight := range weights {
 		if weight.Destination == nil {
 			errs = multierror.Append(errs, errors.New("destination is required"))
+		}
+		for name := range weight.AppendRequestHeaders {
+			errs = appendErrors(errs, ValidateHTTPHeaderName(name))
+		}
+		for name := range weight.AppendResponseHeaders {
+			errs = appendErrors(errs, ValidateHTTPHeaderName(name))
+		}
+		for _, name := range weight.RemoveRequestHeaders {
+			errs = appendErrors(errs, ValidateHTTPHeaderName(name))
+		}
+		for _, name := range weight.RemoveResponseHeaders {
+			errs = appendErrors(errs, ValidateHTTPHeaderName(name))
 		}
 		errs = appendErrors(errs, validateDestination(weight.Destination))
 		errs = appendErrors(errs, ValidatePercent(weight.Weight))
@@ -1479,6 +1552,22 @@ func validateDestinationWeights(weights []*networking.DestinationWeight) (errs e
 	}
 	if len(weights) > 1 && totalWeight != 100 {
 		errs = appendErrors(errs, fmt.Errorf("total destination weight %v != 100", totalWeight))
+	}
+	return
+}
+
+func validateRouteDestinations(weights []*networking.RouteDestination) (errs error) {
+	var totalWeight int32
+	for _, weight := range weights {
+		if weight.Destination == nil {
+			errs = multierror.Append(errs, errors.New("destination is required"))
+		}
+		errs = appendErrors(errs, validateDestination(weight.Destination))
+		errs = appendErrors(errs, ValidatePercent(weight.Weight))
+		if len(weights) > 1 && weight.Weight < 1 {
+			errs = multierror.Append(errs, errors.New("positive weight is required"))
+		}
+		totalWeight += weight.Weight
 	}
 	return
 }
@@ -1541,7 +1630,7 @@ func validateHTTPFaultInjectionAbort(abort *networking.HTTPFaultInjection_Abort)
 		return
 	}
 
-	errs = appendErrors(errs, ValidatePercent(abort.Percent))
+	errs = appendErrors(errs, validatePercentageOrDefault(abort.Percentage, abort.Percent))
 
 	switch abort.ErrorType.(type) {
 	case *networking.HTTPFaultInjection_Abort_GrpcStatus:
@@ -1569,7 +1658,8 @@ func validateHTTPFaultInjectionDelay(delay *networking.HTTPFaultInjection_Delay)
 		return
 	}
 
-	errs = appendErrors(errs, ValidatePercent(delay.Percent))
+	errs = appendErrors(errs, validatePercentageOrDefault(delay.Percentage, delay.Percent))
+
 	switch v := delay.HttpDelayType.(type) {
 	case *networking.HTTPFaultInjection_Delay_FixedDelay:
 		errs = appendErrors(errs, ValidateDurationGogo(v.FixedDelay))
@@ -1577,6 +1667,7 @@ func validateHTTPFaultInjectionDelay(delay *networking.HTTPFaultInjection_Delay)
 		errs = appendErrors(errs, ValidateDurationGogo(v.ExponentialDelay))
 		errs = multierror.Append(errs, fmt.Errorf("exponentialDelay not supported yet"))
 	}
+
 	return
 }
 
@@ -1601,7 +1692,7 @@ func validateSubsetName(name string) error {
 		return fmt.Errorf("subset name cannot be empty")
 	}
 	if !IsDNS1123Label(name) {
-		return fmt.Errorf("subnet name is invalid: %s", name)
+		return fmt.Errorf("subset name is invalid: %s", name)
 	}
 	return nil
 }
@@ -1774,6 +1865,28 @@ func ValidateServiceEntry(name, namespace string, config proto.Message) (errs er
 	default:
 		errs = appendErrors(errs, fmt.Errorf("unsupported resolution type %s",
 			networking.ServiceEntry_Resolution_name[int32(serviceEntry.Resolution)]))
+	}
+
+	// multiple hosts and TCP is invalid unless the resolution type is NONE.
+	// depending on the protocol, we can differentiate between hosts when proxying:
+	// - with HTTP, the authority header can be used
+	// - with HTTPS/TLS with SNI, the ServerName can be used
+	// however, for plain TCP there is no way to differentiate between the
+	// hosts so we consider it invalid, unless the resolution type is NONE
+	// (because the hosts are ignored).
+	if serviceEntry.Resolution != networking.ServiceEntry_NONE && len(serviceEntry.Hosts) > 1 {
+		canDifferentiate := true
+		for _, port := range serviceEntry.Ports {
+			protocol := ParseProtocol(port.Protocol)
+			if !protocol.IsHTTP() && !protocol.IsTLS() {
+				canDifferentiate = false
+				break
+			}
+		}
+
+		if !canDifferentiate {
+			errs = appendErrors(errs, fmt.Errorf("multiple hosts provided with non-HTTP, non-TLS ports"))
+		}
 	}
 
 	for _, port := range serviceEntry.Ports {

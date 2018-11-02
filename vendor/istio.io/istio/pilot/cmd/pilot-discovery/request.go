@@ -16,6 +16,7 @@ package main
 
 import (
 	"net/http"
+	"time"
 
 	"github.com/spf13/cobra"
 
@@ -30,7 +31,9 @@ var (
 		RunE: func(c *cobra.Command, args []string) error {
 			command := &request.Command{
 				Address: "127.0.0.1:9093",
-				Client:  &http.Client{},
+				Client: &http.Client{
+					Timeout: 60 * time.Second,
+				},
 			}
 			body := ""
 			if len(args) > 2 {

@@ -2,6 +2,15 @@
 resources:
 # Types from Pilot
 
+  - kind:        "Ingress"
+    singular:    "ingress"
+    plural:      "ingresses"
+    group:       "extensions"
+    version:     "v1beta1"
+    proto:       "k8s.io.api.extensions.v1beta1.IngressSpec"
+    protoPackage: "k8s.io/api/extensions/v1beta1"
+    converter:    "kube-ingress-resource"
+
   - kind:        "VirtualService"
     singular:    "virtualservice"
     plural:      "virtualservices"
@@ -71,6 +80,7 @@ resources:
     group:       "authentication.istio.io"
     version:     "v1alpha1"
     proto:       "istio.authentication.v1alpha1.Policy"
+    converter:   "auth-policy-resource"
 
   - kind:          "MeshPolicy"
     clusterScoped: true
@@ -79,34 +89,38 @@ resources:
     group:         "authentication.istio.io"
     version:       "v1alpha1"
     proto:         "istio.authentication.v1alpha1.Policy"
+    converter:     "auth-policy-resource"
 
   - kind:        "ServiceRole"
     singular:    "servicerole"
     plural:      "serviceroles"
-#    group:       "rbac.istio.io"
-#    version:     "v1alpha1"
-    group:       "config.istio.io"
-    version:     "v1alpha2"
+    group:       "rbac.istio.io"
+    version:     "v1alpha1"
     proto:       "istio.rbac.v1alpha1.ServiceRole"
 
   - kind:        "ServiceRoleBinding"
     clusterScoped: false
-    singular:      "servicerolebinding"
-    plural:        "servicerolebindings"
-#    group:       "rbac.istio.io"
-#    version:     "v1alpha1"
-    group:       "config.istio.io"
-    version:     "v1alpha2"
-    proto:         "istio.rbac.v1alpha1.ServiceRoleBinding"
+    singular:    "servicerolebinding"
+    plural:      "servicerolebindings"
+    group:       "rbac.istio.io"
+    version:     "v1alpha1"
+    proto:       "istio.rbac.v1alpha1.ServiceRoleBinding"
 
-  - kind:        "Rbac"
-    listKind:    "rbacList"
-    singular:    "rbac"
-    plural:      "rbacs"
-#    group:       "rbac.istio.io"
-#    version:     "v1alpha1"
-    group:       "config.istio.io"
-    version:     "v1alpha2"
+  - kind:        "RbacConfig"
+    listKind:    "RbacConfigList"
+    singular:    "rbacconfig"
+    plural:      "rbacconfigs"
+    group:       "rbac.istio.io"
+    version:     "v1alpha1"
+    proto:       "istio.rbac.v1alpha1.RbacConfig"
+
+  - kind:        "ClusterRbacConfig"
+    clusterScoped: true
+    listKind:    "ClusterRbacConfigList"
+    singular:    "clusterrbacconfig"
+    plural:      "clusterrbacconfigs"
+    group:       "rbac.istio.io"
+    version:     "v1alpha1"
     proto:       "istio.rbac.v1alpha1.RbacConfig"
 
 # Types from Mixer
@@ -243,6 +257,15 @@ resources:
   - kind:        "prometheus"
     singular:    "prometheus"
     plural:      "prometheuses"
+    group:       "config.istio.io"
+    version:     "v1alpha2"
+    proto:       "istio.mcp.v1alpha1.extensions.LegacyMixerResource"
+    converter:   "legacy-mixer-resource"
+    protoPackage: "istio.io/istio/galley/pkg/kube/converter/legacy"
+
+  - kind:        "redisquota"
+    singular:    "redisquota"
+    plural:      "redisquotas"
     group:       "config.istio.io"
     version:     "v1alpha2"
     proto:       "istio.mcp.v1alpha1.extensions.LegacyMixerResource"

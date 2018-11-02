@@ -4,7 +4,7 @@ description: Describes the rules used to configure Mixer's policy and telemetry 
 location: https://istio.io/docs/reference/config/policy-and-telemetry/istio.policy.v1beta1.html
 layout: protoc-gen-docs
 generator: protoc-gen-docs
-number_of_entries: 15
+number_of_entries: 18
 ---
 <p>Describes the rules used to configure Mixer&rsquo;s policy and telemetry features.</p>
 
@@ -46,6 +46,14 @@ Must match the <code>name</code> of a <a href="#Handler-name">Handler</a>.</p>
 <a href="#Instance-name">Instance</a>s.
 Referenced instances are evaluated by resolving the attributes/literals for all the fields.
 The constructed objects are then passed to the <code>handler</code> referenced within this action.</p>
+
+</td>
+</tr>
+<tr id="Action-name">
+<td><code>name</code></td>
+<td><code>string</code></td>
+<td>
+<p>Optional. A handle to refer to the results of the action.</p>
 
 </td>
 </tr>
@@ -202,6 +210,14 @@ Connection is part of the handler custom resource and is specified alongside ada
 
 </td>
 </tr>
+<tr id="Connection-timeout">
+<td><code>timeout</code></td>
+<td><code><a href="https://developers.google.com/protocol-buffers/docs/reference/google.protobuf#duration">google.protobuf.Duration</a></code></td>
+<td>
+<p>Timeout for remote calls to the backend.</p>
+
+</td>
+</tr>
 </tbody>
 </table>
 </section>
@@ -284,6 +300,39 @@ type EmailAddress</p>
 <td><code>string</code></td>
 <td>
 <p>EmailAddress encoded as string.</p>
+
+</td>
+</tr>
+</tbody>
+</table>
+</section>
+<h2 id="FractionalPercent-DenominatorType">FractionalPercent.DenominatorType</h2>
+<section>
+<p>Fraction percentages support several fixed denominator values.</p>
+
+<table class="enum-values">
+<thead>
+<tr>
+<th>Name</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr id="FractionalPercent-DenominatorType-HUNDRED">
+<td><code>HUNDRED</code></td>
+<td>
+<p>100.</p>
+
+<p><strong>Example</strong>: <sup>1</sup>&frasl;<sub>100</sub> = 1%.</p>
+
+</td>
+</tr>
+<tr id="FractionalPercent-DenominatorType-TEN_THOUSAND">
+<td><code>TEN_THOUSAND</code></td>
+<td>
+<p>10,000.</p>
+
+<p><strong>Example</strong>: <sup>1</sup>&frasl;<sub>10000</sub> = 0.01%.</p>
 
 </td>
 </tr>
@@ -506,6 +555,25 @@ proto defined by the template; this varies depending on the value of field <code
 
 </td>
 </tr>
+<tr id="Instance-attribute_bindings">
+<td><code>attributeBindings</code></td>
+<td><code>map&lt;string,&nbsp;string&gt;</code></td>
+<td>
+<p>Optional. Defines attribute bindings to map the output of attribute-producing adapters back into
+the attribute space. The variable <code>output</code> refers to the output template instance produced
+by the adapter.
+The following example derives <code>source.namespace</code> from <code>source.uid</code> in the context of Kubernetes:</p>
+
+<pre><code class="language-yaml">params:
+  # Pass the required attribute data to the adapter
+  source_uid: source.uid | &quot;&quot;
+attribute_bindings:
+  # Fill the new attributes from the adapter produced output
+  source.namespace: output.source_namespace
+</code></pre>
+
+</td>
+</tr>
 </tbody>
 </table>
 </section>
@@ -558,6 +626,100 @@ name starts with &ldquo;ratings&rdquo;</li>
 <td><code><a href="#Action">Action[]</a></code></td>
 <td>
 <p>Optional. The actions that will be executed when match evaluates to <code>true</code>.</p>
+
+</td>
+</tr>
+<tr id="Rule-request_header_operations">
+<td><code>requestHeaderOperations</code></td>
+<td><code><a href="#Rule-HeaderOperationTemplate">Rule.HeaderOperationTemplate[]</a></code></td>
+<td>
+<p>Optional. Templatized operations on the request headers using attributes produced by the
+rule actions.</p>
+
+</td>
+</tr>
+<tr id="Rule-response_header_operations">
+<td><code>responseHeaderOperations</code></td>
+<td><code><a href="#Rule-HeaderOperationTemplate">Rule.HeaderOperationTemplate[]</a></code></td>
+<td>
+<p>Optional. Templatized operations on the response headers using attributes produced by the
+rule actions.</p>
+
+</td>
+</tr>
+</tbody>
+</table>
+</section>
+<h2 id="Rule-HeaderOperationTemplate">Rule.HeaderOperationTemplate</h2>
+<section>
+<p>A template for an HTTP header manipulation.</p>
+
+<table class="message-fields">
+<thead>
+<tr>
+<th>Field</th>
+<th>Type</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr id="Rule-HeaderOperationTemplate-name">
+<td><code>name</code></td>
+<td><code>string</code></td>
+<td>
+<p>Required. Header name.</p>
+
+</td>
+</tr>
+<tr id="Rule-HeaderOperationTemplate-values">
+<td><code>values</code></td>
+<td><code>string[]</code></td>
+<td>
+<p>Optional. Header values to replace or append.</p>
+
+</td>
+</tr>
+<tr id="Rule-HeaderOperationTemplate-operation">
+<td><code>operation</code></td>
+<td><code><a href="#Rule-HeaderOperationTemplate-Operation">Rule.HeaderOperationTemplate.Operation</a></code></td>
+<td>
+<p>Optional. Header operation type. Default operation is to replace the value of the header by name.</p>
+
+</td>
+</tr>
+</tbody>
+</table>
+</section>
+<h2 id="Rule-HeaderOperationTemplate-Operation">Rule.HeaderOperationTemplate.Operation</h2>
+<section>
+<p>Header operation type.</p>
+
+<table class="enum-values">
+<thead>
+<tr>
+<th>Name</th>
+<th>Description</th>
+</tr>
+</thead>
+<tbody>
+<tr id="Rule-HeaderOperationTemplate-Operation-REPLACE">
+<td><code>REPLACE</code></td>
+<td>
+<p>replaces the header with the given name</p>
+
+</td>
+</tr>
+<tr id="Rule-HeaderOperationTemplate-Operation-REMOVE">
+<td><code>REMOVE</code></td>
+<td>
+<p>removes the header with the given name (the value is ignored)</p>
+
+</td>
+</tr>
+<tr id="Rule-HeaderOperationTemplate-Operation-APPEND">
+<td><code>APPEND</code></td>
+<td>
+<p>appends the values to the existing values (preserving existing values)</p>
 
 </td>
 </tr>

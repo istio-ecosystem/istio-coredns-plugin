@@ -1,0 +1,67 @@
+[[constraint]]
+  name = "istio.io/api"
+  branch = "master"
+#  branch = "release-1.0"
+
+[[constraint]]
+  name = "istio.io/istio"
+  branch = "master"
+#  branch = "release-1.0"
+#  version = "1.0.0"
+
+#[[override]]
+#  name = "k8s.io/api"
+#  version = "kubernetes-1.9.3"
+
+#[[override]]
+#  name = "k8s.io/apimachinery"
+#  version = "kubernetes-1.9.3"
+
+#[[override]]
+#  name = "k8s.io/apiextensions-apiserver"
+#  version = "kubernetes-1.9.3"
+
+#[[override]]
+#  name = "k8s.io/client-go"
+#  version = "kubernetes-1.9.3"
+
+[[constraint]]
+  name = "k8s.io/api"
+  version = "kubernetes-1.10.4"
+
+[[constraint]]
+  name = "k8s.io/apimachinery"
+  version = "kubernetes-1.10.4"
+
+[[constraint]]
+  name = "k8s.io/apiextensions-apiserver"
+  version = "kubernetes-1.10.4"
+
+[[constraint]]
+  name = "k8s.io/cluster-registry"
+  version = "0.0.3"
+
+[[constraint]]
+  name = "k8s.io/helm"
+  version = "2.9.1"
+
+[[constraint]]
+  name = "k8s.io/ingress"
+  version = "0.9.6"
+
+[[constraint]]
+  name = "k8s.io/kubernetes"
+  version = "v1.10.4"
+
+# https://github.com/kubernetes/client-go#compatibility-matrix
+# for details.
+[[override]]
+  name = "k8s.io/client-go"
+  branch = "release-7.0"        # For K8s 1.10.x
+
+# matching client-go 6 == k8s 1.9 == v9 (!)
+[[override]]
+  name = "github.com/Azure/go-autorest"
+  version = "v9.10.0"
+
+

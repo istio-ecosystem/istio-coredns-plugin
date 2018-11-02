@@ -17,19 +17,23 @@ package pstest
 import (
 	"fmt"
 	"io"
+	"sync"
 	"testing"
 	"time"
 
-	"github.com/golang/protobuf/ptypes"
-
 	"cloud.google.com/go/internal/testutil"
+	"github.com/golang/protobuf/ptypes"
 	"golang.org/x/net/context"
 	pb "google.golang.org/genproto/googleapis/pubsub/v1"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 func TestTopics(t *testing.T) {
 	pclient, _, server := newFake(t)
+	defer server.Close()
+
 	ctx := context.Background()
 	var topics []*pb.Topic
 	for i := 1; i < 3; i++ {
@@ -71,6 +75,8 @@ func TestTopics(t *testing.T) {
 
 func TestSubscriptions(t *testing.T) {
 	pclient, sclient, server := newFake(t)
+	defer server.Close()
+
 	ctx := context.Background()
 	topic := mustCreateTopic(t, pclient, &pb.Topic{Name: "projects/P/topics/T"})
 	var subs []*pb.Subscription
@@ -127,8 +133,58 @@ func TestSubscriptions(t *testing.T) {
 	}
 }
 
+func TestSubscriptionErrors(t *testing.T) {
+	_, sclient, srv := newFake(t)
+	defer srv.Close()
+
+	ctx := context.Background()
+
+	// TODO(jba): Go1.9: use t.Helper()
+	checkCode := func(msg string, err error, want codes.Code) {
+		if status.Code(err) != want {
+			t.Errorf("%s: got %v, want code %s", msg, err, want)
+		}
+	}
+
+	_, err := sclient.GetSubscription(ctx, &pb.GetSubscriptionRequest{})
+	checkCode("GetSubscription", err, codes.InvalidArgument)
+	_, err = sclient.GetSubscription(ctx, &pb.GetSubscriptionRequest{Subscription: "s"})
+	checkCode("GetSubscription", err, codes.NotFound)
+	_, err = sclient.UpdateSubscription(ctx, &pb.UpdateSubscriptionRequest{})
+	checkCode("UpdateSubscription", err, codes.InvalidArgument)
+	_, err = sclient.UpdateSubscription(ctx, &pb.UpdateSubscriptionRequest{Subscription: &pb.Subscription{}})
+	checkCode("UpdateSubscription", err, codes.InvalidArgument)
+	_, err = sclient.UpdateSubscription(ctx, &pb.UpdateSubscriptionRequest{Subscription: &pb.Subscription{Name: "s"}})
+	checkCode("UpdateSubscription", err, codes.NotFound)
+	_, err = sclient.DeleteSubscription(ctx, &pb.DeleteSubscriptionRequest{})
+	checkCode("DeleteSubscription", err, codes.InvalidArgument)
+	_, err = sclient.DeleteSubscription(ctx, &pb.DeleteSubscriptionRequest{Subscription: "s"})
+	checkCode("DeleteSubscription", err, codes.NotFound)
+	_, err = sclient.Acknowledge(ctx, &pb.AcknowledgeRequest{})
+	checkCode("Acknowledge", err, codes.InvalidArgument)
+	_, err = sclient.Acknowledge(ctx, &pb.AcknowledgeRequest{Subscription: "s"})
+	checkCode("Acknowledge", err, codes.NotFound)
+	_, err = sclient.ModifyAckDeadline(ctx, &pb.ModifyAckDeadlineRequest{})
+	checkCode("ModifyAckDeadline", err, codes.InvalidArgument)
+	_, err = sclient.ModifyAckDeadline(ctx, &pb.ModifyAckDeadlineRequest{Subscription: "s"})
+	checkCode("ModifyAckDeadline", err, codes.NotFound)
+	_, err = sclient.Pull(ctx, &pb.PullRequest{})
+	checkCode("Pull", err, codes.InvalidArgument)
+	_, err = sclient.Pull(ctx, &pb.PullRequest{Subscription: "s"})
+	checkCode("Pull", err, codes.NotFound)
+	_, err = sclient.Seek(ctx, &pb.SeekRequest{})
+	checkCode("Seek", err, codes.InvalidArgument)
+	srt := &pb.SeekRequest_Time{Time: ptypes.TimestampNow()}
+	_, err = sclient.Seek(ctx, &pb.SeekRequest{Target: srt})
+	checkCode("Seek", err, codes.InvalidArgument)
+	_, err = sclient.Seek(ctx, &pb.SeekRequest{Target: srt, Subscription: "s"})
+	checkCode("Seek", err, codes.NotFound)
+}
+
 func TestPublish(t *testing.T) {
 	s := NewServer()
+	defer s.Close()
+
 	var ids []string
 	for i := 0; i < 3; i++ {
 		ids = append(ids, s.Publish("projects/p/topics/t", []byte("hello"), nil))
@@ -179,9 +235,10 @@ func publish(t *testing.T, pclient pb.PublisherClient, topic *pb.Topic, messages
 	return want
 }
 
-func TestStreamingPull(t *testing.T) {
-	// A simple test of streaming pull.
-	pclient, sclient, _ := newFake(t)
+func TestPull(t *testing.T) {
+	pclient, sclient, srv := newFake(t)
+	defer srv.Close()
+
 	top := mustCreateTopic(t, pclient, &pb.Topic{Name: "projects/P/topics/T"})
 	sub := mustCreateSubscription(t, sclient, &pb.Subscription{
 		Name:               "projects/P/subscriptions/S",
@@ -198,12 +255,45 @@ func TestStreamingPull(t *testing.T) {
 	if diff := testutil.Diff(got, want); diff != "" {
 		t.Error(diff)
 	}
+
+	res, err := sclient.Pull(context.Background(), &pb.PullRequest{Subscription: sub.Name})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.ReceivedMessages) != 0 {
+		t.Errorf("got %d messages, want zero", len(res.ReceivedMessages))
+	}
+}
+
+func TestStreamingPull(t *testing.T) {
+	// A simple test of streaming pull.
+	pclient, sclient, srv := newFake(t)
+	defer srv.Close()
+
+	top := mustCreateTopic(t, pclient, &pb.Topic{Name: "projects/P/topics/T"})
+	sub := mustCreateSubscription(t, sclient, &pb.Subscription{
+		Name:               "projects/P/subscriptions/S",
+		Topic:              top.Name,
+		AckDeadlineSeconds: 10,
+	})
+
+	want := publish(t, pclient, top, []*pb.PubsubMessage{
+		{Data: []byte("d1")},
+		{Data: []byte("d2")},
+		{Data: []byte("d3")},
+	})
+	got := pubsubMessages(streamingPullN(t, len(want), sclient, sub))
+	if diff := testutil.Diff(got, want); diff != "" {
+		t.Error(diff)
+	}
 }
 
 func TestStreamingPullAck(t *testing.T) {
 	// Ack each message as it arrives. Make sure we don't see dups.
 	minAckDeadlineSecs = 1
-	pclient, sclient, _ := newFake(t)
+	pclient, sclient, srv := newFake(t)
+	defer srv.Close()
+
 	top := mustCreateTopic(t, pclient, &pb.Topic{Name: "projects/P/topics/T"})
 	sub := mustCreateSubscription(t, sclient, &pb.Subscription{
 		Name:               "projects/P/subscriptions/S",
@@ -218,7 +308,7 @@ func TestStreamingPullAck(t *testing.T) {
 	})
 
 	got := map[string]bool{}
-	spc := mustStartPull(t, sclient, sub)
+	spc := mustStartStreamingPull(t, sclient, sub)
 	time.AfterFunc(time.Duration(3*minAckDeadlineSecs)*time.Second, func() {
 		if err := spc.CloseSend(); err != nil {
 			t.Errorf("CloseSend: %v", err)
@@ -250,6 +340,8 @@ func TestStreamingPullAck(t *testing.T) {
 func TestAcknowledge(t *testing.T) {
 	ctx := context.Background()
 	pclient, sclient, srv := newFake(t)
+	defer srv.Close()
+
 	top := mustCreateTopic(t, pclient, &pb.Topic{Name: "projects/P/topics/T"})
 	sub := mustCreateSubscription(t, sclient, &pb.Subscription{
 		Name:               "projects/P/subscriptions/S",
@@ -262,7 +354,7 @@ func TestAcknowledge(t *testing.T) {
 		{Data: []byte("d2")},
 		{Data: []byte("d3")},
 	})
-	msgs := pullN(t, 3, sclient, sub)
+	msgs := streamingPullN(t, 3, sclient, sub)
 	var ackIDs []string
 	for _, m := range msgs {
 		ackIDs = append(ackIDs, m.AckId)
@@ -286,7 +378,9 @@ func TestAcknowledge(t *testing.T) {
 
 func TestModAck(t *testing.T) {
 	ctx := context.Background()
-	pclient, sclient, _ := newFake(t)
+	pclient, sclient, srv := newFake(t)
+	defer srv.Close()
+
 	top := mustCreateTopic(t, pclient, &pb.Topic{Name: "projects/P/topics/T"})
 	sub := mustCreateSubscription(t, sclient, &pb.Subscription{
 		Name:               "projects/P/subscriptions/S",
@@ -299,7 +393,7 @@ func TestModAck(t *testing.T) {
 		{Data: []byte("d2")},
 		{Data: []byte("d3")},
 	})
-	msgs := pullN(t, 3, sclient, sub)
+	msgs := streamingPullN(t, 3, sclient, sub)
 	var ackIDs []string
 	for _, m := range msgs {
 		ackIDs = append(ackIDs, m.AckId)
@@ -312,7 +406,7 @@ func TestModAck(t *testing.T) {
 		t.Fatal(err)
 	}
 	// Having nacked all three messages, we should see them again.
-	msgs = pullN(t, 3, sclient, sub)
+	msgs = streamingPullN(t, 3, sclient, sub)
 	if got, want := len(msgs), 3; got != want {
 		t.Errorf("got %d messages, want %d", got, want)
 	}
@@ -320,7 +414,9 @@ func TestModAck(t *testing.T) {
 
 func TestAckDeadline(t *testing.T) {
 	// Messages should be resent after they expire.
-	pclient, sclient, _ := newFake(t)
+	pclient, sclient, srv := newFake(t)
+	defer srv.Close()
+
 	minAckDeadlineSecs = 2
 	top := mustCreateTopic(t, pclient, &pb.Topic{Name: "projects/P/topics/T"})
 	sub := mustCreateSubscription(t, sclient, &pb.Subscription{
@@ -336,7 +432,7 @@ func TestAckDeadline(t *testing.T) {
 	})
 
 	got := map[string]int{}
-	spc := mustStartPull(t, sclient, sub)
+	spc := mustStartStreamingPull(t, sclient, sub)
 	// In 5 seconds the ack deadline will expire twice, so we should see each message
 	// exactly three times.
 	time.AfterFunc(5*time.Second, func() {
@@ -365,7 +461,9 @@ func TestAckDeadline(t *testing.T) {
 
 func TestMultiSubs(t *testing.T) {
 	// Each subscription gets every message.
-	pclient, sclient, _ := newFake(t)
+	pclient, sclient, srv := newFake(t)
+	defer srv.Close()
+
 	top := mustCreateTopic(t, pclient, &pb.Topic{Name: "projects/P/topics/T"})
 	sub1 := mustCreateSubscription(t, sclient, &pb.Subscription{
 		Name:               "projects/P/subscriptions/S1",
@@ -383,8 +481,8 @@ func TestMultiSubs(t *testing.T) {
 		{Data: []byte("d2")},
 		{Data: []byte("d3")},
 	})
-	got1 := pubsubMessages(pullN(t, len(want), sclient, sub1))
-	got2 := pubsubMessages(pullN(t, len(want), sclient, sub2))
+	got1 := pubsubMessages(streamingPullN(t, len(want), sclient, sub1))
+	got2 := pubsubMessages(streamingPullN(t, len(want), sclient, sub2))
 	if diff := testutil.Diff(got1, want); diff != "" {
 		t.Error(diff)
 	}
@@ -395,7 +493,9 @@ func TestMultiSubs(t *testing.T) {
 
 func TestMultiStreams(t *testing.T) {
 	// Messages are handed out to the streams of a subscription in round-robin order.
-	pclient, sclient, _ := newFake(t)
+	pclient, sclient, srv := newFake(t)
+	defer srv.Close()
+
 	top := mustCreateTopic(t, pclient, &pb.Topic{Name: "projects/P/topics/T"})
 	sub := mustCreateSubscription(t, sclient, &pb.Subscription{
 		Name:               "projects/P/subscriptions/S",
@@ -409,8 +509,8 @@ func TestMultiStreams(t *testing.T) {
 		{Data: []byte("d4")},
 	})
 	streams := []pb.Subscriber_StreamingPullClient{
-		mustStartPull(t, sclient, sub),
-		mustStartPull(t, sclient, sub),
+		mustStartStreamingPull(t, sclient, sub),
+		mustStartStreamingPull(t, sclient, sub),
 	}
 	got := map[string]*pb.PubsubMessage{}
 	for i := 0; i < 2; i++ {
@@ -430,6 +530,8 @@ func TestMultiStreams(t *testing.T) {
 
 func TestStreamingPullTimeout(t *testing.T) {
 	pclient, sclient, srv := newFake(t)
+	defer srv.Close()
+
 	timeout := 200 * time.Millisecond
 	srv.SetStreamTimeout(timeout)
 	top := mustCreateTopic(t, pclient, &pb.Topic{Name: "projects/P/topics/T"})
@@ -438,7 +540,7 @@ func TestStreamingPullTimeout(t *testing.T) {
 		Topic:              top.Name,
 		AckDeadlineSeconds: 10,
 	})
-	stream := mustStartPull(t, sclient, sub)
+	stream := mustStartStreamingPull(t, sclient, sub)
 	time.Sleep(2 * timeout)
 	_, err := stream.Recv()
 	if err != io.EOF {
@@ -447,27 +549,63 @@ func TestStreamingPullTimeout(t *testing.T) {
 }
 
 func TestSeek(t *testing.T) {
-	pclient, sclient, _ := newFake(t)
+	pclient, sclient, srv := newFake(t)
+	defer srv.Close()
+
 	top := mustCreateTopic(t, pclient, &pb.Topic{Name: "projects/P/topics/T"})
 	sub := mustCreateSubscription(t, sclient, &pb.Subscription{
 		Name:               "projects/P/subscriptions/S",
 		Topic:              top.Name,
 		AckDeadlineSeconds: 10,
 	})
-	ts, err := ptypes.TimestampProto(time.Now())
-	if err != nil {
-		t.Fatal(err)
-	}
-	_, err = sclient.Seek(context.Background(), &pb.SeekRequest{
+	ts := ptypes.TimestampNow()
+	_, err := sclient.Seek(context.Background(), &pb.SeekRequest{
 		Subscription: sub.Name,
-		Target:       &pb.SeekRequest_Time{ts},
+		Target:       &pb.SeekRequest_Time{Time: ts},
 	})
 	if err != nil {
 		t.Errorf("Seeking: %v", err)
 	}
 }
 
-func mustStartPull(t *testing.T, sc pb.SubscriberClient, sub *pb.Subscription) pb.Subscriber_StreamingPullClient {
+func TestTryDeliverMessage(t *testing.T) {
+	for _, test := range []struct {
+		desc           string
+		availStreamIdx int
+		expectedOutIdx int
+	}{
+		{availStreamIdx: 0, expectedOutIdx: 0},
+		// Stream 1 will always be marked for deletion.
+		{availStreamIdx: 2, expectedOutIdx: 1}, // s0, s1 (deleted), s2, s3 becomes s0, s2, s3. So we expect outIdx=1.
+		{availStreamIdx: 3, expectedOutIdx: 2}, // s0, s1 (deleted), s2, s3 becomes s0, s2, s3. So we expect outIdx=2.
+	} {
+		top := newTopic(&pb.Topic{Name: "some-topic"})
+		sub := newSubscription(top, &sync.Mutex{}, &pb.Subscription{Name: "some-sub", Topic: "some-topic"})
+
+		done := make(chan struct{}, 1)
+		done <- struct{}{}
+		sub.streams = []*stream{{}, {done: done}, {}, {}}
+
+		msgc := make(chan *pb.ReceivedMessage, 1)
+		sub.streams[test.availStreamIdx].msgc = msgc
+
+		var d int
+		idx, ok := sub.tryDeliverMessage(&message{deliveries: &d}, 0, time.Now())
+		if !ok {
+			t.Fatalf("[avail=%d]: expected msg to be put on stream %d's channel, but it was not", test.availStreamIdx, test.expectedOutIdx)
+		}
+		if idx != test.expectedOutIdx {
+			t.Fatalf("[avail=%d]: expected msg to be put on stream %d, but it was put on %d", test.availStreamIdx, test.expectedOutIdx, idx)
+		}
+		select {
+		case <-msgc:
+		default:
+			t.Fatalf("[avail=%d]: expected msg to be put on stream %d's channel, but it was not", test.availStreamIdx, idx)
+		}
+	}
+}
+
+func mustStartStreamingPull(t *testing.T, sc pb.SubscriberClient, sub *pb.Subscription) pb.Subscriber_StreamingPullClient {
 	spc, err := sc.StreamingPull(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -479,7 +617,22 @@ func mustStartPull(t *testing.T, sc pb.SubscriberClient, sub *pb.Subscription) p
 }
 
 func pullN(t *testing.T, n int, sc pb.SubscriberClient, sub *pb.Subscription) map[string]*pb.ReceivedMessage {
-	spc := mustStartPull(t, sc, sub)
+	ctx := context.Background()
+	got := map[string]*pb.ReceivedMessage{}
+	for i := 0; len(got) < n; i++ {
+		res, err := sc.Pull(ctx, &pb.PullRequest{Subscription: sub.Name, MaxMessages: int32(n - len(got))})
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, m := range res.ReceivedMessages {
+			got[m.Message.MessageId] = m
+		}
+	}
+	return got
+}
+
+func streamingPullN(t *testing.T, n int, sc pb.SubscriberClient, sub *pb.Subscription) map[string]*pb.ReceivedMessage {
+	spc := mustStartStreamingPull(t, sc, sub)
 	got := map[string]*pb.ReceivedMessage{}
 	for i := 0; i < n; i++ {
 		res, err := spc.Recv()
@@ -524,6 +677,7 @@ func mustCreateSubscription(t *testing.T, sc pb.SubscriberClient, sub *pb.Subscr
 	return sub
 }
 
+// Note: be sure to close server!
 func newFake(t *testing.T) (pb.PublisherClient, pb.SubscriberClient, *Server) {
 	srv := NewServer()
 	conn, err := grpc.Dial(srv.Addr, grpc.WithInsecure())

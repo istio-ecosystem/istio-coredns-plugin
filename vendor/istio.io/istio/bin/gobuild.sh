@@ -1,6 +1,6 @@
 #!/bin/bash
-#
-# Copyright 2017 Istio Authors. All Rights Reserved.
+
+# Copyright 2017 Istio Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -23,7 +23,7 @@ if [[ "${VERBOSE}" == "1" ]];then
     set -x
 fi
 
-ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+ROOTDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
 OUT=${1:?"output path"}
 BUILDPATH=${2:?"path to build"}
@@ -53,7 +53,7 @@ fi
 # at the beginning of the build and used throughout
 if [[ -z ${BUILDINFO} ]];then
     BUILDINFO=$(mktemp)
-    "${ROOT}/bin/get_workspace_status" > "${BUILDINFO}"
+    "${ROOTDIR}/bin/get_workspace_status.sh" > "${BUILDINFO}"
 fi
 
 # BUILD LD_EXTRAFLAGS

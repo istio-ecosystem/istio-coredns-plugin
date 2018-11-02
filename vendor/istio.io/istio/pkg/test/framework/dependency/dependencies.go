@@ -18,7 +18,10 @@ const (
 	// Apps is a dependency on fake networked apps. This can be used to mimic traffic thru a mesh.
 	Apps = Instance("apps")
 
-	// Kubernetes is required for running the test.
+	// Local environment is required for running the test.
+	Local = Instance("local")
+
+	// Kubernetes environment is required for running the test.
 	Kubernetes = Instance("kubernetes")
 
 	// GKE dependency
@@ -43,4 +46,16 @@ const (
 	// In cluster mode, this is satisfied via existing API Server. In local model, this is satisfied
 	// via a minikube installation.
 	APIServer = Instance("apiserver")
+
+	// Citadel indicates a dependency on Citadel.
+	Citadel = Instance("citadel")
+
+	// BookInfo indicates that BookInfo sample should be deployed.
+	BookInfo = Instance("bookInfo")
+
+	// Prometheus indicates that a handle to a deployed Prometheus instance in Kubernetes should be returned.
+	Prometheus = Instance("prometheus")
+
+	// Ingress indicates a dependency on the ingress gateway.
+	Ingress = Instance("ingress")
 )

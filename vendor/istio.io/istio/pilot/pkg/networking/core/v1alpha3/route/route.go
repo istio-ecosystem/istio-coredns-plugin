@@ -16,6 +16,7 @@ package route
 
 import (
 	"fmt"
+	"reflect"
 	"sort"
 	"strings"
 	"time"
@@ -24,9 +25,9 @@ import (
 	"github.com/envoyproxy/go-control-plane/envoy/api/v2/route"
 	xdsfault "github.com/envoyproxy/go-control-plane/envoy/config/filter/fault/v2"
 	xdshttpfault "github.com/envoyproxy/go-control-plane/envoy/config/filter/http/fault/v2"
+	xdstype "github.com/envoyproxy/go-control-plane/envoy/type"
 	xdsutil "github.com/envoyproxy/go-control-plane/pkg/util"
 	"github.com/gogo/protobuf/types"
-	"github.com/prometheus/client_golang/prometheus"
 
 	networking "istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/model"
@@ -40,24 +41,6 @@ const (
 	HeaderAuthority = ":authority"
 	HeaderScheme    = ":scheme"
 )
-
-var (
-	// experiment on getting some monitoring on config errors.
-	noClusterMissingPort = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "pilot_route_cluster_no_port",
-		Help: "Routes with no clusters due to missing port.",
-	}, []string{"service", "rule"})
-
-	noClusterMissingService = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "pilot_route_nocluster_no_service",
-		Help: "Routes with no clusters due to missing service",
-	}, []string{"service", "rule"})
-)
-
-func init() {
-	prometheus.MustRegister(noClusterMissingPort)
-	prometheus.MustRegister(noClusterMissingService)
-}
 
 // VirtualHostWrapper is a context-dependent virtual host entry with guarded routes.
 // Note: Currently we are not fully utilizing this structure. We could invoke this logic
@@ -86,7 +69,6 @@ type VirtualHostWrapper struct {
 // services from the service registry. Services are indexed by FQDN hostnames.
 func BuildVirtualHostsFromConfigAndRegistry(
 	node *model.Proxy,
-	configStore model.IstioConfigStore,
 	push *model.PushContext,
 	serviceRegistry map[model.Hostname]*model.Service,
 	proxyLabels model.LabelsCollection) []VirtualHostWrapper {
@@ -97,7 +79,7 @@ func BuildVirtualHostsFromConfigAndRegistry(
 	virtualServices := push.VirtualServices(meshGateway)
 	// translate all virtual service configs into virtual hosts
 	for _, virtualService := range virtualServices {
-		wrappers := buildVirtualHostsForVirtualService(node, configStore, push, virtualService, serviceRegistry, proxyLabels, meshGateway)
+		wrappers := buildVirtualHostsForVirtualService(node, push, virtualService, serviceRegistry, proxyLabels, meshGateway)
 		if len(wrappers) == 0 {
 			// If none of the routes matched by source (i.e. proxyLabels), then discard this entire virtual service
 			continue
@@ -167,7 +149,6 @@ func separateVSHostsAndServices(virtualService model.Config,
 // It may return an empty list if no VirtualService rule has a matching service.
 func buildVirtualHostsForVirtualService(
 	node *model.Proxy,
-	configStore model.IstioConfigStore,
 	push *model.PushContext,
 	virtualService model.Config,
 	serviceRegistry map[model.Hostname]*model.Service,
@@ -232,6 +213,10 @@ func GetDestinationCluster(destination *networking.Destination, service *model.S
 		if service != nil && len(service.Ports) == 1 {
 			port = service.Ports[0].Port
 		}
+		// Do not return blackhole cluster for service==nil case as there is a legitimate use case for
+		// calling this function with nil service: to route to a pre-defined statically configured cluster
+		// declared as part of the bootstrap.
+		// If blackhole cluster is needed, do the check on the caller side. See gateway and tls.go for examples.
 	}
 
 	return model.BuildSubsetKey(model.TrafficDirectionOutbound, destination.Subset, model.Hostname(destination.Host), port)
@@ -261,17 +246,22 @@ func BuildHTTPRoutesForVirtualService(
 	vsName := virtualService.ConfigMeta.Name
 
 	out := make([]route.Route, 0, len(vs.Http))
+allroutes:
 	for _, http := range vs.Http {
 		if len(http.Match) == 0 {
 			if r := translateRoute(push, node, http, nil, port, vsName, serviceRegistry, proxyLabels, gatewayNames); r != nil {
 				out = append(out, *r)
 			}
-			break // we have a rule with catch all match prefix: /. Other rules are of no use
+			break allroutes // we have a rule with catch all match prefix: /. Other rules are of no use
 		} else {
-			// TODO: https://github.com/istio/istio/issues/4239
 			for _, match := range http.Match {
 				if r := translateRoute(push, node, http, match, port, vsName, serviceRegistry, proxyLabels, gatewayNames); r != nil {
 					out = append(out, *r)
+					rType, _ := getEnvoyRouteTypeAndVal(r)
+					if rType == envoyCatchAll {
+						// We have a catch all route. No point building other routes, with match conditions
+						break allroutes
+					}
 				}
 			}
 		}
@@ -330,8 +320,6 @@ func translateRoute(push *model.PushContext, node *model.Proxy, in *networking.H
 		PerFilterConfig: make(map[string]*types.Struct),
 	}
 
-	_, is10Proxy := node.GetProxyVersion()
-
 	if redirect := in.Redirect; redirect != nil {
 		out.Action = &route.Route_Redirect{
 			Redirect: &route.RedirectAction{
@@ -345,25 +333,18 @@ func translateRoute(push *model.PushContext, node *model.Proxy, in *networking.H
 			Cors:        translateCORSPolicy(in.CorsPolicy),
 			RetryPolicy: translateRetryPolicy(in.Retries),
 		}
-		if !is10Proxy {
-			action.UseWebsocket = &types.BoolValue{Value: in.WebsocketUpgrade}
-		}
 
 		if in.Timeout != nil {
 			d := util.GogoDurationToDuration(in.Timeout)
 			// timeout
 			action.Timeout = &d
-			if is10Proxy {
-				action.MaxGrpcTimeout = &d
-			}
+			action.MaxGrpcTimeout = &d
 		} else {
 			// if no timeout is specified, disable timeouts. This is easier
 			// to reason about than assuming some defaults.
 			d := 0 * time.Second
 			action.Timeout = &d
-			if is10Proxy {
-				action.MaxGrpcTimeout = &d
-			}
+			action.MaxGrpcTimeout = &d
 		}
 
 		out.Action = &route.Route_Route{Route: action}
@@ -375,17 +356,11 @@ func translateRoute(push *model.PushContext, node *model.Proxy, in *networking.H
 			}
 		}
 
-		if len(in.AppendHeaders) > 0 {
-			action.RequestHeadersToAdd = make([]*core.HeaderValueOption, 0)
-			for key, value := range in.AppendHeaders {
-				action.RequestHeadersToAdd = append(action.RequestHeadersToAdd, &core.HeaderValueOption{
-					Header: &core.HeaderValue{
-						Key:   key,
-						Value: value,
-					},
-				})
-			}
-		}
+		out.RequestHeadersToAdd = append(translateAppendHeaders(in.AppendRequestHeaders), translateAppendHeaders(in.AppendHeaders)...)
+		out.ResponseHeadersToAdd = translateAppendHeaders(in.AppendResponseHeaders)
+
+		out.RequestHeadersToRemove = in.RemoveRequestHeaders
+		out.ResponseHeadersToRemove = in.RemoveResponseHeaders
 
 		if in.Mirror != nil {
 			n := GetDestinationCluster(in.Mirror, serviceRegistry[model.Hostname(in.Mirror.Host)], port)
@@ -408,10 +383,17 @@ func translateRoute(push *model.PushContext, node *model.Proxy, in *networking.H
 
 			hostname := model.Hostname(dst.GetDestination().GetHost())
 			n := GetDestinationCluster(dst.Destination, serviceRegistry[hostname], port)
-			weighted = append(weighted, &route.WeightedCluster_ClusterWeight{
-				Name:   n,
-				Weight: weight,
-			})
+
+			clusterWeight := &route.WeightedCluster_ClusterWeight{
+				Name:                    n,
+				Weight:                  weight,
+				RequestHeadersToAdd:     translateAppendHeaders(dst.AppendRequestHeaders),
+				RequestHeadersToRemove:  dst.RemoveRequestHeaders,
+				ResponseHeadersToAdd:    translateAppendHeaders(dst.AppendResponseHeaders),
+				ResponseHeadersToRemove: dst.RemoveResponseHeaders,
+			}
+
+			weighted = append(weighted, clusterWeight)
 
 			hashPolicy := getHashPolicy(push, dst)
 			if hashPolicy != nil {
@@ -422,6 +404,10 @@ func translateRoute(push *model.PushContext, node *model.Proxy, in *networking.H
 		// rewrite to a single cluster if there is only weighted cluster
 		if len(weighted) == 1 {
 			action.ClusterSpecifier = &route.RouteAction_Cluster{Cluster: weighted[0].Name}
+			out.RequestHeadersToAdd = append(out.RequestHeadersToAdd, weighted[0].RequestHeadersToAdd...)
+			out.RequestHeadersToRemove = append(out.RequestHeadersToRemove, weighted[0].RequestHeadersToRemove...)
+			out.ResponseHeadersToAdd = append(out.ResponseHeadersToAdd, weighted[0].ResponseHeadersToAdd...)
+			out.ResponseHeadersToRemove = append(out.ResponseHeadersToRemove, weighted[0].ResponseHeadersToRemove...)
 		} else {
 			action.ClusterSpecifier = &route.RouteAction_WeightedClusters{
 				WeightedClusters: &route.WeightedCluster{
@@ -435,10 +421,48 @@ func translateRoute(push *model.PushContext, node *model.Proxy, in *networking.H
 		Operation: getRouteOperation(out, vsName, port),
 	}
 	if fault := in.Fault; fault != nil {
-		out.PerFilterConfig[xdsutil.Fault] = util.MessageToStruct(translateFault(in.Fault))
+		out.PerFilterConfig[xdsutil.Fault] = util.MessageToStruct(translateFault(node, in.Fault))
 	}
 
 	return out
+}
+
+// SortHeaderValueOption type and the functions below (Len, Less and Swap) are for sort.Stable for type HeaderValueOption
+type SortHeaderValueOption []*core.HeaderValueOption
+
+// Len is i the sort.Interface for SortHeaderValueOption
+func (b SortHeaderValueOption) Len() int {
+	return len(b)
+}
+
+// Less is in the sort.Interface for SortHeaderValueOption
+func (b SortHeaderValueOption) Less(i, j int) bool {
+	if b[i] == nil || b[i].Header == nil {
+		return false
+	} else if b[j] == nil || b[j].Header == nil {
+		return true
+	}
+	return strings.Compare(b[i].Header.Key, b[j].Header.Key) < 0
+}
+
+// Swap is in the sort.Interface for SortHeaderValueOption
+func (b SortHeaderValueOption) Swap(i, j int) {
+	b[i], b[j] = b[j], b[i]
+}
+
+// translateAppendHeaders translates headers
+func translateAppendHeaders(headers map[string]string) []*core.HeaderValueOption {
+	headerValueOptionList := make([]*core.HeaderValueOption, 0, len(headers))
+	for key, value := range headers {
+		headerValueOptionList = append(headerValueOptionList, &core.HeaderValueOption{
+			Header: &core.HeaderValue{
+				Key:   key,
+				Value: value,
+			},
+		})
+	}
+	sort.Stable(SortHeaderValueOption(headerValueOptionList))
+	return headerValueOptionList
 }
 
 // translateRouteMatch translates match condition
@@ -455,9 +479,14 @@ func translateRouteMatch(in *networking.HTTPMatchRequest) route.RouteMatch {
 
 	// guarantee ordering of headers
 	sort.Slice(out.Headers, func(i, j int) bool {
-		// TODO: match by values as well. But we have about 5-6 types of values
-		// in a header matcher. Not sorting by values "might" cause unnecessary
-		// RDS churn in some cases.
+		if out.Headers[i].Name == out.Headers[j].Name {
+			if reflect.TypeOf(out.Headers[i].HeaderMatchSpecifier) == reflect.TypeOf(out.Headers[j].HeaderMatchSpecifier) {
+				var bi, bj []byte
+				out.Headers[i].HeaderMatchSpecifier.MarshalTo(bi)
+				out.Headers[j].HeaderMatchSpecifier.MarshalTo(bj)
+				return string(bi) < string(bj)
+			}
+		}
 		return out.Headers[i].Name < out.Headers[j].Name
 	})
 
@@ -573,7 +602,6 @@ func getRouteOperation(in *route.Route, vsName string, port int) string {
 // BuildDefaultHTTPRoute builds a default route.
 func BuildDefaultHTTPRoute(node *model.Proxy, clusterName string, operation string) *route.Route {
 	notimeout := 0 * time.Second
-	_, is10Proxy := node.GetProxyVersion()
 
 	defaultRoute := &route.Route{
 		Match: translateRouteMatch(nil),
@@ -588,29 +616,55 @@ func BuildDefaultHTTPRoute(node *model.Proxy, clusterName string, operation stri
 		},
 	}
 
-	if is10Proxy {
-		defaultRoute.Action = &route.Route_Route{
-			Route: &route.RouteAction{
-				ClusterSpecifier: &route.RouteAction_Cluster{Cluster: clusterName},
-				Timeout:          &notimeout,
-				MaxGrpcTimeout:   &notimeout,
-			},
-		}
+	defaultRoute.Action = &route.Route_Route{
+		Route: &route.RouteAction{
+			ClusterSpecifier: &route.RouteAction_Cluster{Cluster: clusterName},
+			Timeout:          &notimeout,
+			MaxGrpcTimeout:   &notimeout,
+		},
 	}
 	return defaultRoute
 }
 
+// translatePercentToFractionalPercent translates an v1alpha3 Percent instance
+// to an envoy.type.FractionalPercent instance.
+func translatePercentToFractionalPercent(p *networking.Percent) *xdstype.FractionalPercent {
+	return &xdstype.FractionalPercent{
+		Numerator:   uint32(p.Value * 10000),
+		Denominator: xdstype.FractionalPercent_MILLION,
+	}
+}
+
+// translateIntegerToFractionalPercent translates an int32 instance to an
+// envoy.type.FractionalPercent instance.
+func translateIntegerToFractionalPercent(p int32) *xdstype.FractionalPercent {
+	return &xdstype.FractionalPercent{
+		Numerator:   uint32(p * 10000),
+		Denominator: xdstype.FractionalPercent_MILLION,
+	}
+}
+
 // translateFault translates networking.HTTPFaultInjection into Envoy's HTTPFault
-func translateFault(in *networking.HTTPFaultInjection) *xdshttpfault.HTTPFault {
+func translateFault(node *model.Proxy, in *networking.HTTPFaultInjection) *xdshttpfault.HTTPFault {
 	if in == nil {
 		return nil
 	}
 
 	out := xdshttpfault.HTTPFault{}
 	if in.Delay != nil {
-		out.Delay = &xdsfault.FaultDelay{
-			Type:    xdsfault.FaultDelay_FIXED,
-			Percent: uint32(in.Delay.Percent),
+		out.Delay = &xdsfault.FaultDelay{Type: xdsfault.FaultDelay_FIXED}
+		if util.Is11Proxy(node) {
+			if in.Delay.Percentage != nil {
+				out.Delay.Percentage = translatePercentToFractionalPercent(in.Delay.Percentage)
+			} else {
+				out.Delay.Percentage = translateIntegerToFractionalPercent(in.Delay.Percent)
+			}
+		} else {
+			if in.Delay.Percentage != nil {
+				out.Delay.Percentage = translatePercentToFractionalPercent(in.Delay.Percentage)
+			} else {
+				out.Delay.Percentage = translateIntegerToFractionalPercent(in.Delay.Percent)
+			}
 		}
 		switch d := in.Delay.HttpDelayType.(type) {
 		case *networking.HTTPFaultInjection_Delay_FixedDelay:
@@ -625,8 +679,19 @@ func translateFault(in *networking.HTTPFaultInjection) *xdshttpfault.HTTPFault {
 	}
 
 	if in.Abort != nil {
-		out.Abort = &xdshttpfault.FaultAbort{
-			Percent: uint32(in.Abort.Percent),
+		out.Abort = &xdshttpfault.FaultAbort{}
+		if util.Is11Proxy(node) {
+			if in.Abort.Percentage != nil {
+				out.Abort.Percentage = translatePercentToFractionalPercent(in.Abort.Percentage)
+			} else {
+				out.Abort.Percentage = translateIntegerToFractionalPercent(in.Abort.Percent)
+			}
+		} else {
+			if in.Abort.Percentage != nil {
+				out.Abort.Percentage = translatePercentToFractionalPercent(in.Abort.Percentage)
+			} else {
+				out.Abort.Percentage = translateIntegerToFractionalPercent(in.Abort.Percent)
+			}
 		}
 		switch a := in.Abort.ErrorType.(type) {
 		case *networking.HTTPFaultInjection_Abort_HttpStatus:
@@ -666,7 +731,7 @@ func portLevelSettingsConsistentHash(dst *networking.Destination,
 	return nil
 }
 
-func getHashPolicy(push *model.PushContext, dst *networking.DestinationWeight) *route.RouteAction_HashPolicy {
+func getHashPolicy(push *model.PushContext, dst *networking.HTTPRouteDestination) *route.RouteAction_HashPolicy {
 	if push == nil {
 		return nil
 	}
@@ -734,4 +799,72 @@ func getHashPolicy(push *model.PushContext, dst *networking.DestinationWeight) *
 	}
 
 	return nil
+}
+
+type envoyRouteType int
+
+const (
+	envoyPath envoyRouteType = iota
+	envoyPrefix
+	envoyRegex
+	envoyCatchAll
+)
+
+func getEnvoyRouteTypeAndVal(r *route.Route) (envoyRouteType, string) {
+	var iType envoyRouteType
+	var iVal string
+
+	switch iR := r.Match.PathSpecifier.(type) {
+	case *route.RouteMatch_Path:
+		iVal = iR.Path
+		iType = envoyPath
+	case *route.RouteMatch_Prefix:
+		iVal = iR.Prefix
+		iType = envoyPrefix
+	case *route.RouteMatch_Regex:
+		iVal = iR.Regex
+		iType = envoyRegex
+	}
+
+	// A route is catch all if and only if it has no header/query param match
+	// and has a prefix / or regex *.
+	if (iVal == "/" && iType == envoyPrefix) || (iVal == "*" && iType == envoyRegex) {
+		if len(r.Match.Headers) == 0 && len(r.Match.QueryParameters) == 0 {
+			iType = envoyCatchAll
+		}
+	}
+	return iType, iVal
+}
+
+// CombineVHostRoutes semi concatenates two Vhost's routes into a single route set.
+// Moves the catch all routes alone to the end, while retaining
+// the relative order of other routes in the concatenated route.
+// Assumes that the virtual services that generated first and second are ordered by
+// time.
+func CombineVHostRoutes(first []route.Route, second []route.Route) []route.Route {
+	allroutes := make([]route.Route, 0, len(first)+len(second))
+	catchAllRoutes := make([]route.Route, 0)
+
+	for _, f := range first {
+		rType, _ := getEnvoyRouteTypeAndVal(&f)
+		switch rType {
+		case envoyCatchAll:
+			catchAllRoutes = append(catchAllRoutes, f)
+		default:
+			allroutes = append(allroutes, f)
+		}
+	}
+
+	for _, s := range second {
+		rType, _ := getEnvoyRouteTypeAndVal(&s)
+		switch rType {
+		case envoyCatchAll:
+			catchAllRoutes = append(catchAllRoutes, s)
+		default:
+			allroutes = append(allroutes, s)
+		}
+	}
+
+	allroutes = append(allroutes, catchAllRoutes...)
+	return allroutes
 }

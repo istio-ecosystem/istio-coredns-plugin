@@ -1,16 +1,16 @@
-//  Copyright 2018 Istio Authors
+// Copyright 2018 Istio Authors
 //
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package resource
 
@@ -57,8 +57,8 @@ func TestVersion_Equality_False(t *testing.T) {
 	}
 }
 func TestKey_Equality_True(t *testing.T) {
-	k1 := Key{TypeURL: TypeURL{"a"}, FullName: "ks"}
-	k2 := Key{TypeURL: TypeURL{"a"}, FullName: "ks"}
+	k1 := Key{TypeURL: TypeURL{"a"}, FullName: FullName{"ks"}}
+	k2 := Key{TypeURL: TypeURL{"a"}, FullName: FullName{"ks"}}
 
 	if k1 != k2 {
 		t.Fatalf("Expected to be equal: %v == %v", k1, k2)
@@ -66,8 +66,8 @@ func TestKey_Equality_True(t *testing.T) {
 }
 
 func TestKey_Equality_False_DifferentTypeURL(t *testing.T) {
-	k1 := Key{TypeURL: TypeURL{"a"}, FullName: "ks"}
-	k2 := Key{TypeURL: TypeURL{"b"}, FullName: "ks"}
+	k1 := Key{TypeURL: TypeURL{"a"}, FullName: FullName{"ks"}}
+	k2 := Key{TypeURL: TypeURL{"b"}, FullName: FullName{"ks"}}
 
 	if k1 == k2 {
 		t.Fatalf("Expected to be not equal: %v == %v", k1, k2)
@@ -75,8 +75,8 @@ func TestKey_Equality_False_DifferentTypeURL(t *testing.T) {
 }
 
 func TestKey_Equality_False_DifferentName(t *testing.T) {
-	k1 := Key{TypeURL: TypeURL{"a"}, FullName: "ks"}
-	k2 := Key{TypeURL: TypeURL{"a"}, FullName: "otherks"}
+	k1 := Key{TypeURL: TypeURL{"a"}, FullName: FullName{"ks"}}
+	k2 := Key{TypeURL: TypeURL{"a"}, FullName: FullName{"otherks"}}
 
 	if k1 == k2 {
 		t.Fatalf("Expected to be not equal: %v == %v", k1, k2)
@@ -84,16 +84,16 @@ func TestKey_Equality_False_DifferentName(t *testing.T) {
 }
 
 func TestKey_String(t *testing.T) {
-	k1 := Key{TypeURL: TypeURL{"a"}, FullName: "ks"}
+	k1 := Key{TypeURL: TypeURL{"a"}, FullName: FullName{"ks"}}
 	// Ensure that it doesn't crash
 	_ = k1.String()
 }
 
 func TestVersionedKey_Equality_True(t *testing.T) {
 	k1 := VersionedKey{
-		Key: Key{TypeURL: TypeURL{"a"}, FullName: "ks"}, Version: Version("v1")}
+		Key: Key{TypeURL: TypeURL{"a"}, FullName: FullName{"ks"}}, Version: Version("v1")}
 	k2 := VersionedKey{
-		Key: Key{TypeURL: TypeURL{"a"}, FullName: "ks"}, Version: Version("v1")}
+		Key: Key{TypeURL: TypeURL{"a"}, FullName: FullName{"ks"}}, Version: Version("v1")}
 
 	if k1 != k2 {
 		t.Fatalf("Expected to be equal: %v == %v", k1, k2)
@@ -102,9 +102,9 @@ func TestVersionedKey_Equality_True(t *testing.T) {
 
 func TestVersionedKey_Equality_False_DifferentTypeURL(t *testing.T) {
 	k1 := VersionedKey{
-		Key: Key{TypeURL: TypeURL{"a"}, FullName: "ks"}, Version: Version("v1")}
+		Key: Key{TypeURL: TypeURL{"a"}, FullName: FullName{"ks"}}, Version: Version("v1")}
 	k2 := VersionedKey{
-		Key: Key{TypeURL: TypeURL{"b"}, FullName: "ks"}, Version: Version("v1")}
+		Key: Key{TypeURL: TypeURL{"b"}, FullName: FullName{"ks"}}, Version: Version("v1")}
 
 	if k1 == k2 {
 		t.Fatalf("Expected to be not equal: %v == %v", k1, k2)
@@ -113,9 +113,9 @@ func TestVersionedKey_Equality_False_DifferentTypeURL(t *testing.T) {
 
 func TestVersionedKey_Equality_False_DifferentName(t *testing.T) {
 	k1 := VersionedKey{
-		Key: Key{TypeURL: TypeURL{"a"}, FullName: "ks"}, Version: Version("v1")}
+		Key: Key{TypeURL: TypeURL{"a"}, FullName: FullName{"ks"}}, Version: Version("v1")}
 	k2 := VersionedKey{
-		Key: Key{TypeURL: TypeURL{"a"}, FullName: "otherks"}, Version: Version("v1")}
+		Key: Key{TypeURL: TypeURL{"a"}, FullName: FullName{"otherks"}}, Version: Version("v1")}
 
 	if k1 == k2 {
 		t.Fatalf("Expected to be not equal: %v == %v", k1, k2)
@@ -124,9 +124,9 @@ func TestVersionedKey_Equality_False_DifferentName(t *testing.T) {
 
 func TestVersionedKey_Equality_False_DifferentVersion(t *testing.T) {
 	k1 := VersionedKey{
-		Key: Key{TypeURL: TypeURL{"a"}, FullName: "ks"}, Version: Version("v1")}
+		Key: Key{TypeURL: TypeURL{"a"}, FullName: FullName{"ks"}}, Version: Version("v1")}
 	k2 := VersionedKey{
-		Key: Key{TypeURL: TypeURL{"a"}, FullName: "ks"}, Version: Version("v2")}
+		Key: Key{TypeURL: TypeURL{"a"}, FullName: FullName{"ks"}}, Version: Version("v2")}
 
 	if k1 == k2 {
 		t.Fatalf("Expected to be not equal: %v == %v", k1, k2)
@@ -135,7 +135,7 @@ func TestVersionedKey_Equality_False_DifferentVersion(t *testing.T) {
 
 func TestVersionedKey_String(t *testing.T) {
 	k1 := VersionedKey{
-		Key: Key{TypeURL: TypeURL{"a"}, FullName: "ks"}, Version: Version("v1")}
+		Key: Key{TypeURL: TypeURL{"a"}, FullName: FullName{"ks"}}, Version: Version("v1")}
 	// Ensure that it doesn't crash
 	_ = k1.String()
 }

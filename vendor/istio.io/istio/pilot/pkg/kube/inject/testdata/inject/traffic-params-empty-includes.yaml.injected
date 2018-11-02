@@ -9,7 +9,7 @@ spec:
   template:
     metadata:
       annotations:
-        sidecar.istio.io/status: '{"version":"","initContainers":["istio-init"],"containers":["istio-proxy"],"volumes":["istio-envoy","istio-certs"],"imagePullSecrets":null}'
+        sidecar.istio.io/status: '{"version":"75c16362c923e62d1ff44f33119b9b94a1688afe69f9787965ae8884c73d264b","initContainers":["istio-init"],"containers":["istio-proxy"],"volumes":["istio-envoy","istio-certs"],"imagePullSecrets":null}'
       creationTimestamp: null
       labels:
         app: traffic
@@ -29,17 +29,13 @@ spec:
         - --binaryPath
         - /usr/local/bin/envoy
         - --serviceCluster
-        - traffic
+        - traffic.default
         - --drainDuration
         - 2s
         - --parentShutdownDuration
         - 3s
         - --discoveryAddress
         - istio-pilot:15007
-        - --discoveryRefreshDelay
-        - 1s
-        - --zipkinAddress
-        - ""
         - --connectTimeout
         - 1s
         - --statsdUdpAddress
@@ -48,6 +44,10 @@ spec:
         - "15000"
         - --controlPlaneAuthPolicy
         - NONE
+        - --statusPort
+        - "15020"
+        - --applicationPorts
+        - "80"
         env:
         - name: POD_NAME
           valueFrom:
@@ -70,13 +70,18 @@ spec:
         image: docker.io/istio/proxyv2:unittest
         imagePullPolicy: IfNotPresent
         name: istio-proxy
+        readinessProbe:
+          failureThreshold: 30
+          httpGet:
+            path: /healthz/ready
+            port: 15020
+          initialDelaySeconds: 1
+          periodSeconds: 2
         resources:
           requests:
             cpu: 10m
         securityContext:
-          privileged: false
           readOnlyRootFilesystem: true
-          runAsUser: 1337
         volumeMounts:
         - mountPath: /etc/istio/proxy
           name: istio-envoy
@@ -98,7 +103,7 @@ spec:
         - -b
         - "80"
         - -d
-        - ""
+        - "15020"
         image: docker.io/istio/proxy_init:unittest
         imagePullPolicy: IfNotPresent
         name: istio-init

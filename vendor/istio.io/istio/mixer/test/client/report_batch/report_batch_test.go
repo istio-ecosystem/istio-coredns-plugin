@@ -1,4 +1,4 @@
-// Copyright 2017 Istio Authors. All Rights Reserved.
+// Copyright 2017 Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -26,11 +26,13 @@ const reportAttributesOkGet = `
 {
   "context.protocol": "http",
   "context.proxy_error_code": "-",
+  "context.reporter.uid": "",
   "mesh1.ip": "[1 1 1 1]",
   "mesh2.ip": "[0 0 0 0 0 0 0 0 0 0 255 255 204 152 189 116]",
   "mesh3.ip": "[0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 8]",
   "request.host": "*",
-  "request.path": "/echo",
+  "request.path": "/echo?a=b&c=d",
+  "request.query_params": {"a": "b", "c": "d"},
   "request.time": "*",
   "request.useragent": "Go-http-client/1.1",
   "request.method": "GET",
@@ -39,6 +41,8 @@ const reportAttributesOkGet = `
   "source.namespace": "XYZ11",
   "destination.ip": "[127 0 0 1]",
   "destination.port": "*",
+  "destination.uid": "",
+  "destination.namespace": "",
   "target.name": "target-name",
   "target.user": "target-user",
   "target.uid": "POD222",
@@ -49,7 +53,7 @@ const reportAttributesOkGet = `
   "quota.cache_hit": false,
   "request.headers": {
      ":method": "GET",
-     ":path": "/echo",
+     ":path": "/echo?a=b&c=d",
      ":authority": "*",
      "x-forwarded-proto": "http",
      "x-istio-attributes": "-",
@@ -67,7 +71,8 @@ const reportAttributesOkGet = `
      "server": "envoy"
   },
   "response.total_size": "*",
-  "request.total_size": 306
+  "request.total_size": 314,
+  "request.url_path": "/echo"
 }
 `
 
@@ -76,11 +81,13 @@ const reportAttributesOkPost1 = `
 {
   "context.protocol": "http",
   "context.proxy_error_code": "-",
+  "context.reporter.uid": "",
   "mesh1.ip": "[1 1 1 1]",
   "mesh2.ip": "[0 0 0 0 0 0 0 0 0 0 255 255 204 152 189 116]",
   "mesh3.ip": "[0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 8]",
   "request.host": "*",
-  "request.path": "/echo",
+  "request.path": "/echo?a=b&c=d",
+  "request.query_params": {"a": "b", "c": "d"},
   "request.time": "*",
   "request.useragent": "Go-http-client/1.1",
   "request.method": "POST",
@@ -89,6 +96,8 @@ const reportAttributesOkPost1 = `
   "source.namespace": "XYZ11",
   "destination.ip": "[127 0 0 1]",
   "destination.port": "*",
+  "destination.uid": "",
+  "destination.namespace": "",
   "target.name": "target-name",
   "target.user": "target-user",
   "target.uid": "POD222",
@@ -99,7 +108,7 @@ const reportAttributesOkPost1 = `
   "quota.cache_hit": false,
   "request.headers": {
      ":method": "POST",
-     ":path": "/echo",
+     ":path": "/echo?a=b&c=d",
      ":authority": "*",
      "x-forwarded-proto": "http",
      "x-istio-attributes": "-",
@@ -118,7 +127,8 @@ const reportAttributesOkPost1 = `
      "server": "envoy"
   },
   "response.total_size": "*",
-  "request.total_size": 342
+  "request.total_size": 350,
+  "request.url_path": "/echo"
 }
 `
 
@@ -127,11 +137,13 @@ const reportAttributesOkPost2 = `
 {
   "context.protocol": "http",
   "context.proxy_error_code": "-",
+  "context.reporter.uid": "",
   "mesh1.ip": "[1 1 1 1]",
   "mesh2.ip": "[0 0 0 0 0 0 0 0 0 0 255 255 204 152 189 116]",
   "mesh3.ip": "[0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 8]",
   "request.host": "*",
-  "request.path": "/echo",
+  "request.path": "/echo?a=b&c=d",
+  "request.query_params": {"a": "b", "c": "d"},
   "request.time": "*",
   "request.useragent": "Go-http-client/1.1",
   "request.method": "POST",
@@ -140,6 +152,8 @@ const reportAttributesOkPost2 = `
   "source.namespace": "XYZ11",
   "destination.ip": "[127 0 0 1]",
   "destination.port": "*",
+  "destination.uid": "",
+  "destination.namespace": "",
   "target.name": "target-name",
   "target.user": "target-user",
   "target.uid": "POD222",
@@ -150,7 +164,7 @@ const reportAttributesOkPost2 = `
   "quota.cache_hit": false,
   "request.headers": {
      ":method": "POST",
-     ":path": "/echo",
+     ":path": "/echo?a=b&c=d",
      ":authority": "*",
      "x-forwarded-proto": "http",
      "x-istio-attributes": "-",
@@ -169,7 +183,8 @@ const reportAttributesOkPost2 = `
      "server": "envoy"
   },
   "response.total_size": "*",
-  "request.total_size": 348
+  "request.total_size": 356,
+  "request.url_path": "/echo"
 }
 `
 
@@ -193,7 +208,7 @@ func TestReportBatch(t *testing.T) {
 	}
 	defer s.TearDown()
 
-	url := fmt.Sprintf("http://localhost:%d/echo", s.Ports().ClientProxyPort)
+	url := fmt.Sprintf("http://localhost:%d/echo?a=b&c=d", s.Ports().ClientProxyPort)
 
 	// Issues a GET echo request with 0 size body
 	tag := "OKGet"

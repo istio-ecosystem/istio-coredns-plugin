@@ -47,7 +47,13 @@ $ kubectl apply -f install/kubernetes/helm/helm-service-account.yaml
 $ helm init --service-account tiller
 ```
 
-3. Install Istio’s [Custom Resource Definitions](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/#customresourcedefinitions) via `kubectl apply`, and wait a few seconds for the CRDs to be committed in the kube-apiserver:
+3. Set and create the namespace where Istio was installed:
+```
+$ NAMESPACE=istio-system
+$ kubectl create ns $NAMESPACE
+```
+
+4. Install Istio’s [Custom Resource Definitions](https://kubernetes.io/docs/concepts/extend-kubernetes/api-extension/custom-resources/#customresourcedefinitions) via `kubectl apply`, and wait a few seconds for the CRDs to be committed in the kube-apiserver:
    ```
    $ kubectl apply -f install/kubernetes/helm/istio/templates/crds.yaml
    ```
@@ -56,15 +62,67 @@ $ helm init --service-account tiller
    $ kubectl apply -f install/kubernetes/helm/istio/charts/certmanager/templates/crds.yaml
    ```
 
-4. To install the chart with the release name `istio` in namespace `istio-system`:
+5. If you are enabling `kiali`, you need to create the secret that contains the username and passphrase for `kiali` dashboard:
+   ```
+   $ echo -n 'admin' | base64
+   YWRtaW4=
+   $ echo -n '1f2d1e2e67df' | base64
+   MWYyZDFlMmU2N2Rm
+   $ cat <<EOF | kubectl apply -f -
+   apiVersion: v1
+   kind: Secret
+   metadata:
+     name: kiali
+     namespace: $NAMESPACE
+     labels:
+       app: kiali
+   type: Opaque
+   data:
+     username: YWRtaW4=
+     passphrase: MWYyZDFlMmU2N2Rm
+   EOF
+   ```
+
+6. If you are using security mode for Grafana, create the secret first as follows:
+
+Encode username, you can change the username to the name as you want:
+```
+$ echo -n 'admin' | base64
+YWRtaW4=
+```
+
+Encode passphrase, you can change the passphrase to the passphrase as you want:
+```
+$ echo -n '1f2d1e2e67df' | base64
+MWYyZDFlMmU2N2Rm
+```
+
+Create secret for Grafana:
+```
+$ cat <<EOF | kubectl apply -f -
+apiVersion: v1
+kind: Secret
+metadata:
+  name: grafana
+  namespace: $NAMESPACE
+  labels:
+    app: grafana
+type: Opaque
+data:
+  username: YWRtaW4=
+  passphrase: MWYyZDFlMmU2N2Rm
+EOF
+```
+
+7. To install the chart with the release name `istio` in namespace $NAMESPACE you defined above:
     - With [automatic sidecar injection](https://istio.io/docs/setup/kubernetes/sidecar-injection/#automatic-sidecar-injection) (requires Kubernetes >=1.9.0):
     ```
-    $ helm install install/kubernetes/helm/istio --name istio --namespace istio-system
+    $ helm install install/kubernetes/helm/istio --name istio --namespace $NAMESPACE
     ```
 
     - Without the sidecar injection webhook:
     ```
-    $ helm install install/kubernetes/helm/istio --name istio --namespace istio-system --set sidecarInjectorWebhook.enabled=false
+    $ helm install install/kubernetes/helm/istio --name istio --namespace $NAMESPACE --set sidecarInjectorWebhook.enabled=false
     ```
 
 ## Configuration
@@ -79,6 +137,7 @@ Helm charts expose configuration options which are currently in alpha.  The curr
 | `global.hub` | Specifies the HUB for most images used by Istio | registry/namespace | `docker.io/istio` |
 | `global.tag` | Specifies the TAG for most images used by Istio | valid image tag | `0.8.latest` |
 | `global.proxy.image` | Specifies the proxy image name | valid proxy name | `proxyv2` |
+| `global.proxy.concurrency` | Specifies the number of proxy worker threads | number, 0 = auto | `0` |
 | `global.imagePullPolicy` | Specifies the image pull policy | valid image pull policy | `IfNotPresent` |
 | `global.controlPlaneSecurityEnabled` | Specifies whether control plane mTLS is enabled | true/false | `false` |
 | `global.mtls.enabled` | Specifies whether mTLS is enabled by default between services | true/false | `false` |
@@ -97,6 +156,7 @@ Helm charts expose configuration options which are currently in alpha.  The curr
 | `grafana.enabled` | Specifies whether Grafana addon should be installed | true/false | `false` |
 | `grafana.persist` | Specifies whether Grafana addon should persist config data | true/false | `false` |
 | `grafana.storageClassName` | If `grafana.persist` is true, specifies the [`StorageClass`](https://kubernetes.io/docs/concepts/storage/storage-classes/) to use for the `PersistentVolumeClaim` | `StorageClass` | "" |
+| `grafana.accessMode` | If `grafana.persist` is true, specifies the [`Access Mode`](https://kubernetes.io/docs/concepts/storage/persistent-volumes/#access-modes) to use for the `PersistentVolumeClaim` | RWO/ROX/RWX | `ReadWriteMany` |
 | `prometheus.enabled` | Specifies whether Prometheus addon should be installed | true/false | `true` |
 | `servicegraph.enabled` | Specifies whether Servicegraph addon should be installed | true/false | `false` |
 | `tracing.enabled` | Specifies whether Tracing(jaeger) addon should be installed | true/false | `false` |

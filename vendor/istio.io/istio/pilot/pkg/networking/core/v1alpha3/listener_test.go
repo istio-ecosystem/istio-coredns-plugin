@@ -15,12 +15,11 @@
 package v1alpha3
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
 	xdsapi "github.com/envoyproxy/go-control-plane/envoy/api/v2"
-
-	"fmt"
 
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/networking/core/v1alpha3/fakes"
@@ -155,7 +154,11 @@ func getOldestService(services ...*model.Service) *model.Service {
 func buildOutboundListeners(p plugin.Plugin, services ...*model.Service) []*xdsapi.Listener {
 	configgen := NewConfigGenerator([]plugin.Plugin{p})
 
-	env := buildListenerEnv()
+	env := buildListenerEnv(services)
+
+	if err := env.PushContext.InitContext(&env); err != nil {
+		return nil
+	}
 
 	instances := make([]*model.ServiceInstance, len(services))
 	for i, s := range services {
@@ -179,12 +182,10 @@ func (p *fakePlugin) OnInboundListener(in *plugin.InputParams, mutable *plugin.M
 	return nil
 }
 
-func (p *fakePlugin) OnOutboundCluster(env *model.Environment, node *model.Proxy, push *model.PushContext, service *model.Service, servicePort *model.Port,
-	cluster *xdsapi.Cluster) {
+func (p *fakePlugin) OnOutboundCluster(in *plugin.InputParams, cluster *xdsapi.Cluster) {
 }
 
-func (p *fakePlugin) OnInboundCluster(env *model.Environment, node *model.Proxy, push *model.PushContext, service *model.Service, servicePort *model.Port,
-	cluster *xdsapi.Cluster) {
+func (p *fakePlugin) OnInboundCluster(in *plugin.InputParams, cluster *xdsapi.Cluster) {
 }
 
 func (p *fakePlugin) OnOutboundRouteConfiguration(in *plugin.InputParams, routeConfiguration *xdsapi.RouteConfiguration) {
@@ -221,14 +222,15 @@ func buildService(hostname string, ip string, protocol model.Protocol, creationT
 	}
 }
 
-func buildListenerEnv() model.Environment {
-	serviceDiscovery := &fakes.ServiceDiscovery{}
+func buildListenerEnv(services []*model.Service) model.Environment {
+	serviceDiscovery := new(fakes.ServiceDiscovery)
+	serviceDiscovery.ServicesReturns(services, nil)
 
 	configStore := &fakes.IstioConfigStore{}
 
 	mesh := model.DefaultMeshConfig()
 	env := model.Environment{
-		PushContext:      model.NewStatus(),
+		PushContext:      model.NewPushContext(),
 		ServiceDiscovery: serviceDiscovery,
 		ServiceAccounts:  &fakes.ServiceAccounts{},
 		IstioConfigStore: configStore,

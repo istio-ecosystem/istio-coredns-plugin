@@ -15,6 +15,7 @@
 package route_test
 
 import (
+	"reflect"
 	"testing"
 	"time"
 
@@ -23,7 +24,6 @@ import (
 
 	networking "istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/model"
-	"istio.io/istio/pilot/pkg/networking/core/v1alpha3/fakes"
 	"istio.io/istio/pilot/pkg/networking/core/v1alpha3/route"
 )
 
@@ -48,7 +48,7 @@ func TestBuildHTTPRoutes(t *testing.T) {
 		IPAddress: "1.1.1.1",
 		ID:        "someID",
 		Domain:    "foo.com",
-		Metadata:  map[string]string{"ISTIO_PROXY_VERSION": "1.0"},
+		Metadata:  map[string]string{"ISTIO_PROXY_VERSION": "1.1"},
 	}
 	gatewayNames := map[string]bool{"some-gateway": true}
 
@@ -58,27 +58,6 @@ func TestBuildHTTPRoutes(t *testing.T) {
 		routes, err := route.BuildHTTPRoutesForVirtualService(node, nil, virtualServicePlain, serviceRegistry, 8080, model.LabelsCollection{}, gatewayNames)
 		g.Expect(err).NotTo(gomega.HaveOccurred())
 		g.Expect(len(routes)).To(gomega.Equal(1))
-	})
-
-	t.Run("destination rule nil traffic policy", func(t *testing.T) {
-		g := gomega.NewGomegaWithT(t)
-
-		configStore := &fakes.IstioConfigStore{}
-		rule := networkingDestinationRule
-		rule.TrafficPolicy = nil
-		cnfg := &model.Config{
-			ConfigMeta: model.ConfigMeta{
-				Type:    model.DestinationRule.Type,
-				Version: model.DestinationRule.Version,
-				Name:    "acme",
-			},
-			Spec: rule,
-		}
-
-		configStore.DestinationRuleReturns(cnfg)
-
-		_, err := route.BuildHTTPRoutesForVirtualService(node, nil, virtualServicePlain, serviceRegistry, 8080, model.LabelsCollection{}, gatewayNames)
-		g.Expect(err).NotTo(gomega.HaveOccurred())
 	})
 
 	t.Run("for virtual service with ring hash", func(t *testing.T) {
@@ -297,7 +276,7 @@ var virtualServiceWithSubset = &networking.VirtualService{
 	Gateways: []string{"some-gateway"},
 	Http: []*networking.HTTPRoute{
 		{
-			Route: []*networking.DestinationWeight{
+			Route: []*networking.HTTPRouteDestination{
 				{
 					Destination: &networking.Destination{
 						Subset: "some-subset",
@@ -320,7 +299,7 @@ var virtualServiceWithSubsetWithPortLevelSettings = &networking.VirtualService{
 	Gateways: []string{"some-gateway"},
 	Http: []*networking.HTTPRoute{
 		{
-			Route: []*networking.DestinationWeight{
+			Route: []*networking.HTTPRouteDestination{
 				{
 					Destination: &networking.Destination{
 						Subset: "port-level-settings-subset",
@@ -349,7 +328,7 @@ var virtualServicePlain = model.Config{
 		Gateways: []string{"some-gateway"},
 		Http: []*networking.HTTPRoute{
 			{
-				Route: []*networking.DestinationWeight{
+				Route: []*networking.HTTPRouteDestination{
 					{
 						Destination: &networking.Destination{
 							Host: "*.example.org",
@@ -450,4 +429,61 @@ var networkingSubsetWithPortLevelSettings = &networking.Subset{
 			},
 		},
 	},
+}
+
+func TestCombineVHostRoutes(t *testing.T) {
+	first := []envoyroute.Route{
+		{Match: envoyroute.RouteMatch{PathSpecifier: &envoyroute.RouteMatch_Path{Path: "/path1"}}},
+		{Match: envoyroute.RouteMatch{PathSpecifier: &envoyroute.RouteMatch_Prefix{Prefix: "/prefix1"}}},
+		{Match: envoyroute.RouteMatch{PathSpecifier: &envoyroute.RouteMatch_Regex{Regex: ".*?regex1"}}},
+		{Match: envoyroute.RouteMatch{PathSpecifier: &envoyroute.RouteMatch_Prefix{Prefix: "/"}}},
+	}
+	second := []envoyroute.Route{
+		{Match: envoyroute.RouteMatch{PathSpecifier: &envoyroute.RouteMatch_Path{Path: "/path12"}}},
+		{Match: envoyroute.RouteMatch{PathSpecifier: &envoyroute.RouteMatch_Prefix{Prefix: "/prefix12"}}},
+		{Match: envoyroute.RouteMatch{PathSpecifier: &envoyroute.RouteMatch_Regex{Regex: ".*?regex12"}}},
+		{Match: envoyroute.RouteMatch{
+			PathSpecifier: &envoyroute.RouteMatch_Regex{Regex: "*"},
+			Headers: []*envoyroute.HeaderMatcher{
+				{
+					Name:                 "foo",
+					HeaderMatchSpecifier: &envoyroute.HeaderMatcher_ExactMatch{ExactMatch: "bar"},
+					InvertMatch:          false,
+				},
+			},
+		}},
+	}
+
+	want := []envoyroute.Route{
+		{Match: envoyroute.RouteMatch{PathSpecifier: &envoyroute.RouteMatch_Path{Path: "/path1"}}},
+		{Match: envoyroute.RouteMatch{PathSpecifier: &envoyroute.RouteMatch_Prefix{Prefix: "/prefix1"}}},
+		{Match: envoyroute.RouteMatch{PathSpecifier: &envoyroute.RouteMatch_Regex{Regex: ".*?regex1"}}},
+		{Match: envoyroute.RouteMatch{PathSpecifier: &envoyroute.RouteMatch_Path{Path: "/path12"}}},
+		{Match: envoyroute.RouteMatch{PathSpecifier: &envoyroute.RouteMatch_Prefix{Prefix: "/prefix12"}}},
+		{Match: envoyroute.RouteMatch{PathSpecifier: &envoyroute.RouteMatch_Regex{Regex: ".*?regex12"}}},
+		{Match: envoyroute.RouteMatch{
+			PathSpecifier: &envoyroute.RouteMatch_Regex{Regex: "*"},
+			Headers: []*envoyroute.HeaderMatcher{
+				{
+					Name:                 "foo",
+					HeaderMatchSpecifier: &envoyroute.HeaderMatcher_ExactMatch{ExactMatch: "bar"},
+					InvertMatch:          false,
+				},
+			},
+		}},
+		{Match: envoyroute.RouteMatch{PathSpecifier: &envoyroute.RouteMatch_Prefix{Prefix: "/"}}},
+	}
+
+	got := route.CombineVHostRoutes(first, second)
+	if !reflect.DeepEqual(want, got) {
+		t.Errorf("CombineVHostRoutes: \n")
+		t.Errorf("got: \n")
+		for _, g := range got {
+			t.Errorf("%v\n", g.Match.PathSpecifier)
+		}
+		t.Errorf("want: \n")
+		for _, g := range want {
+			t.Errorf("%v\n", g.Match.PathSpecifier)
+		}
+	}
 }

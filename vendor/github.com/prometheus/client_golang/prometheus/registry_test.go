@@ -21,9 +21,12 @@ package prometheus_test
 
 import (
 	"bytes"
+	"math/rand"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	dto "github.com/prometheus/client_model/go"
 
@@ -34,7 +37,22 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 )
 
+// uncheckedCollector wraps a Collector but its Describe method yields no Desc.
+type uncheckedCollector struct {
+	c prometheus.Collector
+}
+
+func (u uncheckedCollector) Describe(_ chan<- *prometheus.Desc) {}
+func (u uncheckedCollector) Collect(c chan<- prometheus.Metric) {
+	u.c.Collect(c)
+}
+
 func testHandler(t testing.TB) {
+	// TODO(beorn7): This test is a bit too "end-to-end". It tests quite a
+	// few moving parts that are not strongly coupled. They could/should be
+	// tested separately. However, the changes planned for v0.10 will
+	// require a major rework of this test anyway, at which time I will
+	// structure it in a better way.
 
 	metricVec := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -234,7 +252,90 @@ metric: <
 
 	expectedMetricFamilyInvalidLabelValueAsText := []byte(`An error has occurred during metrics gathering:
 
-collected metric's label constname is not utf8: "\xff"
+collected metric "name" { label:<name:"constname" value:"\377" > label:<name:"labelname" value:"different_val" > counter:<value:42 > } has a label named "constname" whose value is not utf8: "\xff"
+`)
+
+	summary := prometheus.NewSummary(prometheus.SummaryOpts{
+		Name: "complex",
+		Help: "A metric to check collisions with _sum and _count.",
+	})
+	summaryAsText := []byte(`# HELP complex A metric to check collisions with _sum and _count.
+# TYPE complex summary
+complex{quantile="0.5"} NaN
+complex{quantile="0.9"} NaN
+complex{quantile="0.99"} NaN
+complex_sum 0
+complex_count 0
+`)
+	histogram := prometheus.NewHistogram(prometheus.HistogramOpts{
+		Name: "complex",
+		Help: "A metric to check collisions with _sun, _count, and _bucket.",
+	})
+	externalMetricFamilyWithBucketSuffix := &dto.MetricFamily{
+		Name: proto.String("complex_bucket"),
+		Help: proto.String("externaldocstring"),
+		Type: dto.MetricType_COUNTER.Enum(),
+		Metric: []*dto.Metric{
+			{
+				Counter: &dto.Counter{
+					Value: proto.Float64(1),
+				},
+			},
+		},
+	}
+	externalMetricFamilyWithBucketSuffixAsText := []byte(`# HELP complex_bucket externaldocstring
+# TYPE complex_bucket counter
+complex_bucket 1
+`)
+	externalMetricFamilyWithCountSuffix := &dto.MetricFamily{
+		Name: proto.String("complex_count"),
+		Help: proto.String("externaldocstring"),
+		Type: dto.MetricType_COUNTER.Enum(),
+		Metric: []*dto.Metric{
+			{
+				Counter: &dto.Counter{
+					Value: proto.Float64(1),
+				},
+			},
+		},
+	}
+	bucketCollisionMsg := []byte(`An error has occurred during metrics gathering:
+
+collected metric named "complex_bucket" collides with previously collected histogram named "complex"
+`)
+	summaryCountCollisionMsg := []byte(`An error has occurred during metrics gathering:
+
+collected metric named "complex_count" collides with previously collected summary named "complex"
+`)
+	histogramCountCollisionMsg := []byte(`An error has occurred during metrics gathering:
+
+collected metric named "complex_count" collides with previously collected histogram named "complex"
+`)
+	externalMetricFamilyWithDuplicateLabel := &dto.MetricFamily{
+		Name: proto.String("broken_metric"),
+		Help: proto.String("The registry should detect the duplicate label."),
+		Type: dto.MetricType_COUNTER.Enum(),
+		Metric: []*dto.Metric{
+			{
+				Label: []*dto.LabelPair{
+					{
+						Name:  proto.String("foo"),
+						Value: proto.String("bar"),
+					},
+					{
+						Name:  proto.String("foo"),
+						Value: proto.String("baz"),
+					},
+				},
+				Counter: &dto.Counter{
+					Value: proto.Float64(2.7),
+				},
+			},
+		},
+	}
+	duplicateLabelMsg := []byte(`An error has occurred during metrics gathering:
+
+collected metric "broken_metric" { label:<name:"foo" value:"bar" > label:<name:"foo" value:"baz" > counter:<value:2.7 > } has two or more labels with the same name: foo
 `)
 
 	type output struct {
@@ -254,7 +355,7 @@ collected metric's label constname is not utf8: "\xff"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
 				},
 				body: []byte{},
 			},
@@ -265,7 +366,7 @@ collected metric's label constname is not utf8: "\xff"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
 				},
 				body: []byte{},
 			},
@@ -276,7 +377,7 @@ collected metric's label constname is not utf8: "\xff"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
 				},
 				body: []byte{},
 			},
@@ -298,7 +399,7 @@ collected metric's label constname is not utf8: "\xff"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
 				},
 				body: expectedMetricFamilyAsText,
 			},
@@ -322,7 +423,7 @@ collected metric's label constname is not utf8: "\xff"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
 				},
 				body: externalMetricFamilyAsText,
 			},
@@ -365,7 +466,7 @@ collected metric's label constname is not utf8: "\xff"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
 				},
 				body: []byte{},
 			},
@@ -376,7 +477,7 @@ collected metric's label constname is not utf8: "\xff"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
 				},
 				body: expectedMetricFamilyAsText,
 			},
@@ -388,7 +489,7 @@ collected metric's label constname is not utf8: "\xff"
 			},
 			out: output{
 				headers: map[string]string{
-					"Content-Type": `text/plain; version=0.0.4`,
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
 				},
 				body: bytes.Join(
 					[][]byte{
@@ -496,6 +597,98 @@ collected metric's label constname is not utf8: "\xff"
 				externalMetricFamilyWithInvalidLabelValue,
 			},
 		},
+		{ // 17
+			headers: map[string]string{
+				"Accept": "text/plain",
+			},
+			out: output{
+				headers: map[string]string{
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
+				},
+				body: expectedMetricFamilyAsText,
+			},
+			collector: uncheckedCollector{metricVec},
+		},
+		{ // 18
+			headers: map[string]string{
+				"Accept": "text/plain",
+			},
+			out: output{
+				headers: map[string]string{
+					"Content-Type": `text/plain; charset=utf-8`,
+				},
+				body: histogramCountCollisionMsg,
+			},
+			collector: histogram,
+			externalMF: []*dto.MetricFamily{
+				externalMetricFamilyWithCountSuffix,
+			},
+		},
+		{ // 19
+			headers: map[string]string{
+				"Accept": "text/plain",
+			},
+			out: output{
+				headers: map[string]string{
+					"Content-Type": `text/plain; charset=utf-8`,
+				},
+				body: bucketCollisionMsg,
+			},
+			collector: histogram,
+			externalMF: []*dto.MetricFamily{
+				externalMetricFamilyWithBucketSuffix,
+			},
+		},
+		{ // 20
+			headers: map[string]string{
+				"Accept": "text/plain",
+			},
+			out: output{
+				headers: map[string]string{
+					"Content-Type": `text/plain; charset=utf-8`,
+				},
+				body: summaryCountCollisionMsg,
+			},
+			collector: summary,
+			externalMF: []*dto.MetricFamily{
+				externalMetricFamilyWithCountSuffix,
+			},
+		},
+		{ // 21
+			headers: map[string]string{
+				"Accept": "text/plain",
+			},
+			out: output{
+				headers: map[string]string{
+					"Content-Type": `text/plain; version=0.0.4; charset=utf-8`,
+				},
+				body: bytes.Join(
+					[][]byte{
+						summaryAsText,
+						externalMetricFamilyWithBucketSuffixAsText,
+					},
+					[]byte{},
+				),
+			},
+			collector: summary,
+			externalMF: []*dto.MetricFamily{
+				externalMetricFamilyWithBucketSuffix,
+			},
+		},
+		{ // 22
+			headers: map[string]string{
+				"Accept": "text/plain",
+			},
+			out: output{
+				headers: map[string]string{
+					"Content-Type": `text/plain; charset=utf-8`,
+				},
+				body: duplicateLabelMsg,
+			},
+			externalMF: []*dto.MetricFamily{
+				externalMetricFamilyWithDuplicateLabel,
+			},
+		},
 	}
 	for i, scenario := range scenarios {
 		registry := prometheus.NewPedanticRegistry()
@@ -510,7 +703,7 @@ collected metric's label constname is not utf8: "\xff"
 		}
 
 		if scenario.collector != nil {
-			registry.Register(scenario.collector)
+			registry.MustRegister(scenario.collector)
 		}
 		writer := httptest.NewRecorder()
 		handler := prometheus.InstrumentHandler("prometheus", promhttp.HandlerFor(gatherer, promhttp.HandlerOpts{}))
@@ -521,7 +714,7 @@ collected metric's label constname is not utf8: "\xff"
 		handler(writer, request)
 
 		for key, value := range scenario.out.headers {
-			if writer.HeaderMap.Get(key) != value {
+			if writer.Header().Get(key) != value {
 				t.Errorf(
 					"%d. expected %q for header %q, got %q",
 					i, value, key, writer.Header().Get(key),
@@ -548,14 +741,8 @@ func BenchmarkHandler(b *testing.B) {
 	}
 }
 
-func TestRegisterWithOrGet(t *testing.T) {
-	// Replace the default registerer just to be sure. This is bad, but this
-	// whole test will go away once RegisterOrGet is removed.
-	oldRegisterer := prometheus.DefaultRegisterer
-	defer func() {
-		prometheus.DefaultRegisterer = oldRegisterer
-	}()
-	prometheus.DefaultRegisterer = prometheus.NewRegistry()
+func TestAlreadyRegistered(t *testing.T) {
+	reg := prometheus.NewRegistry()
 	original := prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "test",
@@ -571,11 +758,11 @@ func TestRegisterWithOrGet(t *testing.T) {
 		[]string{"foo", "bar"},
 	)
 	var err error
-	if err = prometheus.Register(original); err != nil {
+	if err = reg.Register(original); err != nil {
 		t.Fatal(err)
 	}
-	if err = prometheus.Register(equalButNotSame); err == nil {
-		t.Fatal("expected error when registringe equal collector")
+	if err = reg.Register(equalButNotSame); err == nil {
+		t.Fatal("expected error when registering equal collector")
 	}
 	if are, ok := err.(prometheus.AlreadyRegisteredError); ok {
 		if are.ExistingCollector != original {
@@ -587,4 +774,100 @@ func TestRegisterWithOrGet(t *testing.T) {
 	} else {
 		t.Error("unexpected error:", err)
 	}
+}
+
+// TestHistogramVecRegisterGatherConcurrency is an end-to-end test that
+// concurrently calls Observe on random elements of a HistogramVec while the
+// same HistogramVec is registered concurrently and the Gather method of the
+// registry is called concurrently.
+func TestHistogramVecRegisterGatherConcurrency(t *testing.T) {
+	var (
+		reg = prometheus.NewPedanticRegistry()
+		hv  = prometheus.NewHistogramVec(
+			prometheus.HistogramOpts{
+				Name:        "test_histogram",
+				Help:        "This helps testing.",
+				ConstLabels: prometheus.Labels{"foo": "bar"},
+			},
+			[]string{"one", "two", "three"},
+		)
+		labelValues = []string{"a", "b", "c", "alpha", "beta", "gamma", "aleph", "beth", "gimel"}
+		quit        = make(chan struct{})
+		wg          sync.WaitGroup
+	)
+
+	observe := func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-quit:
+				return
+			default:
+				obs := rand.NormFloat64()*.1 + .2
+				hv.WithLabelValues(
+					labelValues[rand.Intn(len(labelValues))],
+					labelValues[rand.Intn(len(labelValues))],
+					labelValues[rand.Intn(len(labelValues))],
+				).Observe(obs)
+			}
+		}
+	}
+
+	register := func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-quit:
+				return
+			default:
+				if err := reg.Register(hv); err != nil {
+					if _, ok := err.(prometheus.AlreadyRegisteredError); !ok {
+						t.Error("Registering failed:", err)
+					}
+				}
+				time.Sleep(7 * time.Millisecond)
+			}
+		}
+	}
+
+	gather := func() {
+		defer wg.Done()
+		for {
+			select {
+			case <-quit:
+				return
+			default:
+				if g, err := reg.Gather(); err != nil {
+					t.Error("Gathering failed:", err)
+				} else {
+					if len(g) == 0 {
+						continue
+					}
+					if len(g) != 1 {
+						t.Error("Gathered unexpected number of metric families:", len(g))
+					}
+					if len(g[0].Metric[0].Label) != 4 {
+						t.Error("Gathered unexpected number of label pairs:", len(g[0].Metric[0].Label))
+					}
+				}
+				time.Sleep(4 * time.Millisecond)
+			}
+		}
+	}
+
+	wg.Add(10)
+	go observe()
+	go observe()
+	go register()
+	go observe()
+	go gather()
+	go observe()
+	go register()
+	go observe()
+	go gather()
+	go observe()
+
+	time.Sleep(time.Second)
+	close(quit)
+	wg.Wait()
 }

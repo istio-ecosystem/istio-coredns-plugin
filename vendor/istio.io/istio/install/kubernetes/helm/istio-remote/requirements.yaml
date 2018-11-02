@@ -1,8 +1,9 @@
 dependencies:
   - name: sidecarInjectorWebhook
-    version: 1.0.0
-    # repository: file://../sidecarInjectorWebhook
+    version: 1.1.0
     condition: sidecarInjectorWebhook.enabled
+    repository: file://../subcharts/sidecarInjectorWebhook
   - name: security
-    version: 1.0.0
-    # repository: file://../security
+    version: 1.1.0
+    condition: security.enabled
+    repository: file://../subcharts/security

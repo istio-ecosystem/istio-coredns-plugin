@@ -16,21 +16,20 @@ package pilot
 
 import (
 	"context"
+	"fmt"
 	"net"
+
+	meshConfig "istio.io/api/mesh/v1alpha1"
 
 	xdsapi "github.com/envoyproxy/go-control-plane/envoy/api/v2"
 	adsapi "github.com/envoyproxy/go-control-plane/envoy/service/discovery/v2"
 	"google.golang.org/grpc"
 
-	"fmt"
-
 	"github.com/hashicorp/go-multierror"
 
 	"istio.io/istio/pilot/pkg/bootstrap"
-	"istio.io/istio/pilot/pkg/config/memory"
 	"istio.io/istio/pilot/pkg/model"
 	"istio.io/istio/pilot/pkg/proxy/envoy"
-	"istio.io/istio/pilot/pkg/serviceregistry"
 	"istio.io/istio/pkg/test/framework/dependency"
 	"istio.io/istio/pkg/test/framework/environment"
 	"istio.io/istio/pkg/test/framework/environments/kubernetes"
@@ -39,7 +38,8 @@ import (
 )
 
 const (
-	pilotAdsPort = 15010
+	pilotService = "istio-pilot"
+	grpcPortName = "grpc-xds"
 )
 
 var (
@@ -48,6 +48,10 @@ var (
 
 	// KubeComponent is a component for the Kubernetes environment.
 	KubeComponent = &kubeComponent{}
+
+	requiredDeps = []dependency.Instance{
+		dependency.Mixer,
+	}
 )
 
 type localComponent struct{}
@@ -59,7 +63,7 @@ func (c *localComponent) ID() dependency.Instance {
 
 // Requires implements the component.Component interface.
 func (c *localComponent) Requires() []dependency.Instance {
-	return make([]dependency.Instance, 0)
+	return requiredDeps
 }
 
 // Init implements the component.Component interface.
@@ -69,7 +73,7 @@ func (c *localComponent) Init(ctx environment.ComponentContext, deps map[depende
 		return nil, fmt.Errorf("unsupported environment: %q", ctx.Environment().EnvironmentID())
 	}
 
-	return NewLocalPilot(e.IstioSystemNamespace)
+	return NewLocalPilot(e.IstioSystemNamespace, e.Mesh, e.ServiceManager.ConfigStore)
 }
 
 type kubeComponent struct {
@@ -82,7 +86,7 @@ func (c *kubeComponent) ID() dependency.Instance {
 
 // Requires implements the component.Component interface.
 func (c *kubeComponent) Requires() []dependency.Instance {
-	return make([]dependency.Instance, 0)
+	return requiredDeps
 }
 
 // Init implements the component.Component interface.
@@ -92,12 +96,41 @@ func (c *kubeComponent) Init(ctx environment.ComponentContext, deps map[dependen
 		return nil, fmt.Errorf("unsupported environment: %q", ctx.Environment().EnvironmentID())
 	}
 
-	pod, err := e.Accessor.WaitForPodBySelectors(e.IstioSystemNamespace, "istio=pilot")
+	result, err := c.doInit(e)
+	if err != nil {
+		return nil, multierror.Prefix(err, "pilot init failed:")
+	}
+	return result, nil
+}
+
+func (c *kubeComponent) doInit(e *kubernetes.Implementation) (interface{}, error) {
+	s := e.KubeSettings()
+
+	pod, err := e.Accessor.WaitForPodBySelectors(s.IstioSystemNamespace, "istio=pilot")
 	if err != nil {
 		return nil, err
 	}
 
-	return NewKubePilot(ctx.Settings().KubeConfig, pod.Namespace, pod.Name)
+	port, err := getGrpcPort(e)
+	if err != nil {
+		return nil, err
+	}
+
+	return NewKubePilot(e.Accessor, pod.Namespace, pod.Name, port)
+}
+
+func getGrpcPort(e *kubernetes.Implementation) (uint16, error) {
+	s := e.KubeSettings()
+	svc, err := e.Accessor.GetService(s.IstioSystemNamespace, pilotService)
+	if err != nil {
+		return 0, fmt.Errorf("failed to retrieve service %s: %v", pilotService, err)
+	}
+	for _, portInfo := range svc.Spec.Ports {
+		if portInfo.Name == grpcPortName {
+			return uint16(portInfo.TargetPort.IntValue()), nil
+		}
+	}
+	return 0, fmt.Errorf("failed to get target port in service %s", pilotService)
 }
 
 // LocalPilot is the interface for a local pilot server.
@@ -116,15 +149,11 @@ type localPilot struct {
 
 type kubePilot struct {
 	*pilotClient
-	forwarder *kube.PortForwarder
+	forwarder kube.PortForwarder
 }
 
 // NewLocalPilot creates a new pilot for the local environment.
-func NewLocalPilot(namespace string) (LocalPilot, error) {
-	// Use an in-memory config store.
-	configController := memory.NewController(memory.Make(model.IstioConfigTypes))
-
-	mesh := model.DefaultMeshConfig()
+func NewLocalPilot(namespace string, mesh *meshConfig.MeshConfig, configStore model.ConfigStoreCache) (LocalPilot, error) {
 	options := envoy.DiscoveryServiceOptions{
 		HTTPAddr:       ":0",
 		MonitoringAddr: ":0",
@@ -134,16 +163,17 @@ func NewLocalPilot(namespace string) (LocalPilot, error) {
 	bootstrapArgs := bootstrap.PilotArgs{
 		Namespace:        namespace,
 		DiscoveryOptions: options,
-		MeshConfig:       &mesh,
+		MeshConfig:       mesh,
 		Config: bootstrap.ConfigArgs{
-			Controller: configController,
+			Controller: configStore,
 		},
 		// Use the config store for service entries as well.
 		Service: bootstrap.ServiceArgs{
-			Registries: []string{
-				string(serviceregistry.ConfigRegistry),
-			},
+			// A ServiceEntry registry is added by default, which is what we want. Don't include any other registries.
+			Registries: []string{},
 		},
+		// Include all of the default plugins for integration with Mixer, etc.
+		Plugins: bootstrap.DefaultPlugins,
 	}
 
 	// Create the server for the discovery service.
@@ -159,13 +189,12 @@ func NewLocalPilot(namespace string) (LocalPilot, error) {
 
 	// Start the server
 	stopChan := make(chan struct{})
-	_, err = server.Start(stopChan)
-	if err != nil {
+	if err := server.Start(stopChan); err != nil {
 		return nil, err
 	}
 
 	return &localPilot{
-		ConfigStoreCache: configController,
+		ConfigStoreCache: configStore,
 		pilotClient:      client,
 		server:           server,
 		stopChan:         stopChan,
@@ -173,10 +202,16 @@ func NewLocalPilot(namespace string) (LocalPilot, error) {
 }
 
 // NewKubePilot creates a new pilot instance for the kubernetes environment
-func NewKubePilot(kubeConfig, namespace, pod string) (environment.DeployedPilot, error) {
+func NewKubePilot(accessor *kube.Accessor, namespace, pod string, port uint16) (environment.DeployedPilot, error) {
 	// Start port-forwarding for pilot.
-	// TODO(nmittler): Don't use a hard-coded port.
-	forwarder := kube.NewPortForwarder(kubeConfig, namespace, pod, pilotAdsPort)
+	options := &kube.PodSelectOptions{
+		PodNamespace: namespace,
+		PodName:      pod,
+	}
+	forwarder, err := accessor.NewPortForwarder(options, 0, port)
+	if err != nil {
+		return nil, err
+	}
 	if err := forwarder.Start(); err != nil {
 		return nil, err
 	}

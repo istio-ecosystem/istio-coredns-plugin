@@ -1,4 +1,4 @@
-// Copyright 2018 Istio Authors. All Rights Reserved.
+// Copyright 2018 Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -98,7 +98,6 @@ const (
   "context.reporter.kind": "outbound",
   "context.reporter.uid": "kubernetes://pod2.ns2",
   "context.time": "*",
-  "destination.service": "svc.ns3",
   "destination.service.host": "svc.ns3",
   "destination.service.name": "svc",
   "destination.service.namespace": "ns3",
@@ -170,9 +169,6 @@ func (mock) GetProxyServiceInstances(_ *model.Proxy) ([]*model.ServiceInstance, 
 	return nil, nil
 }
 func (mock) GetService(_ model.Hostname) (*model.Service, error) { return nil, nil }
-func (mock) Instances(_ model.Hostname, _ []string, _ model.LabelsCollection) ([]*model.ServiceInstance, error) {
-	return nil, nil
-}
 func (mock) InstancesByPort(_ model.Hostname, _ int, _ model.LabelsCollection) ([]*model.ServiceInstance, error) {
 	return nil, nil
 }
@@ -213,7 +209,7 @@ var (
 			ID:   "pod1.ns1",
 			Type: model.Sidecar,
 			Metadata: map[string]string{
-				"ISTIO_PROXY_VERSION": "1.0",
+				"ISTIO_PROXY_VERSION": "1.1",
 			},
 		},
 		ServiceInstance: &model.ServiceInstance{Service: &svc},
@@ -226,7 +222,7 @@ var (
 			ID:   "pod2.ns2",
 			Type: model.Sidecar,
 			Metadata: map[string]string{
-				"ISTIO_PROXY_VERSION": "1.0",
+				"ISTIO_PROXY_VERSION": "1.1",
 			},
 		},
 		Service: &svc,
@@ -243,8 +239,8 @@ func makeListener(port uint16, cluster string) *v2.Listener {
 		FilterChains: []listener.FilterChain{{Filters: []listener.Filter{{
 			Name: util.TCPProxy,
 			Config: pilotutil.MessageToStruct(&tcp_proxy.TcpProxy{
-				StatPrefix: "tcp",
-				Cluster:    cluster,
+				StatPrefix:       "tcp",
+				ClusterSpecifier: &tcp_proxy.TcpProxy_Cluster{Cluster: cluster},
 			}),
 		}}}},
 	}

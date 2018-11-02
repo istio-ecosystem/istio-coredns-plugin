@@ -1,23 +1,21 @@
-//  Copyright 2018 Istio Authors
+// Copyright 2018 Istio Authors
 //
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package resource
 
 import (
 	"fmt"
-
-	"github.com/gogo/protobuf/proto"
 )
 
 // EventKind is the type of an event.
@@ -44,8 +42,9 @@ const (
 // Event represents a change that occurred against a resource in the source config system.
 type Event struct {
 	Kind EventKind
-	ID   VersionedKey
-	Item proto.Message
+
+	// A single entry, in case the event is Added, Updated or Deleted.
+	Entry Entry
 }
 
 // String implements Stringer.String
@@ -68,5 +67,12 @@ func (k EventKind) String() string {
 
 // String implements Stringer.String
 func (e Event) String() string {
-	return fmt.Sprintf("[Event](%s: %v)", e.Kind.String(), e.ID)
+	switch e.Kind {
+	case Added, Updated, Deleted:
+		return fmt.Sprintf("[Event](%s: %v)", e.Kind.String(), e.Entry.ID)
+	case FullSync:
+		return fmt.Sprintf("[Event](%s)", e.Kind.String())
+	default:
+		return fmt.Sprintf("[Event](%s)", e.Kind.String())
+	}
 }

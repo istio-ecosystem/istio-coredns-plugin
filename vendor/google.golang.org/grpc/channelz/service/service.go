@@ -37,13 +37,17 @@ import (
 	"google.golang.org/grpc/internal/channelz"
 )
 
+func init() {
+	channelz.TurnOn()
+}
+
 func convertToPtypesDuration(sec int64, usec int64) *durpb.Duration {
 	return ptypes.DurationProto(time.Duration(sec*1e9 + usec*1e3))
 }
 
 // RegisterChannelzServiceToServer registers the channelz service to the given server.
 func RegisterChannelzServiceToServer(s *grpc.Server) {
-	channelzgrpc.RegisterChannelzServer(s, &serverImpl{})
+	channelzgrpc.RegisterChannelzServer(s, newCZServer())
 }
 
 func newCZServer() channelzgrpc.ChannelzServer {
@@ -67,6 +71,35 @@ func connectivityStateToProto(s connectivity.State) *channelzpb.ChannelConnectiv
 	default:
 		return &channelzpb.ChannelConnectivityState{State: channelzpb.ChannelConnectivityState_UNKNOWN}
 	}
+}
+
+func channelTraceToProto(ct *channelz.ChannelTrace) *channelzpb.ChannelTrace {
+	pbt := &channelzpb.ChannelTrace{}
+	pbt.NumEventsLogged = ct.EventNum
+	if ts, err := ptypes.TimestampProto(ct.CreationTime); err == nil {
+		pbt.CreationTimestamp = ts
+	}
+	var events []*channelzpb.ChannelTraceEvent
+	for _, e := range ct.Events {
+		cte := &channelzpb.ChannelTraceEvent{
+			Description: e.Desc,
+			Severity:    channelzpb.ChannelTraceEvent_Severity(e.Severity),
+		}
+		if ts, err := ptypes.TimestampProto(e.Timestamp); err == nil {
+			cte.Timestamp = ts
+		}
+		if e.RefID != 0 {
+			switch e.RefType {
+			case channelz.RefChannel:
+				cte.ChildRef = &channelzpb.ChannelTraceEvent_ChannelRef{ChannelRef: &channelzpb.ChannelRef{ChannelId: e.RefID, Name: e.RefName}}
+			case channelz.RefSubChannel:
+				cte.ChildRef = &channelzpb.ChannelTraceEvent_SubchannelRef{SubchannelRef: &channelzpb.SubchannelRef{SubchannelId: e.RefID, Name: e.RefName}}
+			}
+		}
+		events = append(events, cte)
+	}
+	pbt.Events = events
+	return pbt
 }
 
 func channelMetricToProto(cm *channelz.ChannelMetric) *channelzpb.Channel {
@@ -100,6 +133,7 @@ func channelMetricToProto(cm *channelz.ChannelMetric) *channelzpb.Channel {
 		sockets = append(sockets, &channelzpb.SocketRef{SocketId: id, Name: ref})
 	}
 	c.SocketRef = sockets
+	c.Data.Trace = channelTraceToProto(cm.Trace)
 	return c
 }
 
@@ -134,6 +168,7 @@ func subChannelMetricToProto(cm *channelz.SubChannelMetric) *channelzpb.Subchann
 		sockets = append(sockets, &channelzpb.SocketRef{SocketId: id, Name: ref})
 	}
 	sc.SocketRef = sockets
+	sc.Data.Trace = channelTraceToProto(cm.Trace)
 	return sc
 }
 

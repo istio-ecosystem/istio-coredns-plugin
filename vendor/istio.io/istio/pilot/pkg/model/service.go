@@ -30,6 +30,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/envoyproxy/go-control-plane/envoy/api/v2/endpoint"
+
 	authn "istio.io/api/authentication/v1alpha1"
 )
 
@@ -61,22 +63,12 @@ type Service struct {
 	// connections
 	Ports PortList `json:"ports,omitempty"`
 
-	// ExternalName is only set for external services and holds the external
-	// service DNS name.  External services are name-based solution to represent
-	// external service instances as a service inside the cluster.
-	// Deprecated : made obsolete by the MeshExternal and Resolution flags.
-	ExternalName Hostname `json:"external"`
-
 	// ServiceAccounts specifies the service accounts that run the service.
 	ServiceAccounts []string `json:"serviceaccounts,omitempty"`
 
 	// MeshExternal (if true) indicates that the service is external to the mesh.
 	// These services are defined using Istio's ServiceEntry spec.
 	MeshExternal bool
-
-	// LoadBalancingDisabled indicates that no load balancing should be done for this service.
-	// Deprecated : made obsolete by the MeshExternal and Resolution flags.
-	LoadBalancingDisabled bool `json:"-"`
 
 	// Resolution indicates how the service instances need to be resolved before routing
 	// traffic. Most services in the service registry will use static load balancing wherein
@@ -303,6 +295,9 @@ type NetworkEndpoint struct {
 
 	// Defines a platform-specific workload instance identifier (optional).
 	UID string
+
+	// The network where this endpoint is present
+	Network string
 }
 
 // Labels is a non empty set of arbitrary strings. Each version of a service can
@@ -371,6 +366,55 @@ func (si *ServiceInstance) GetAZ() string {
 	return si.Labels[AZLabel]
 }
 
+// IstioEndpoint has the information about a single address+port for a specific
+// service and shard.
+//
+// This will eventually replace NetworkEndpoint and ServiceInstance:
+// - ServicePortName replaces ServicePort, since port number and protocol may not
+// be available when endpoint callbacks are made.
+// - It no longer splits into one ServiceInstance and one NetworkEndpoint - both
+// are in a single struct
+// - doesn't have a pointer to Service - the full Service object may not be available at
+// the time the endpoint is received. The service name is used as a key and used to reconcile.
+// - it has a cached EnvoyEndpoint object - to avoid re-allocating it for each request and
+// client.
+type IstioEndpoint struct {
+
+	// Labels points to the workload or deployment labels.
+	Labels map[string]string
+
+	// Family indicates what type of endpoint, such as TCP or Unix Domain Socket.
+	// Default is TCP.
+	Family AddressFamily
+
+	// Address is the address of the endpoint, using envoy proto.
+	Address string
+
+	// EndpointPort is the port where the workload is listening, can be different
+	// from the service port.
+	EndpointPort uint32
+
+	// ServicePortName tracks the name of the port, to avoid 'eventual consistency' issues.
+	// Sometimes the Endpoint is visible before Service - so looking up the port number would
+	// fail. Instead the mapping to number is made when the clusters are computed. The lazy
+	// computation will also help with 'on-demand' and 'split horizon' - where it will be skipped
+	// for not used clusters or endpoints behind a gate.
+	ServicePortName string
+
+	// UID identifies the workload, for telemetry purpose.
+	UID string
+
+	// EnvoyEndpoint is a cached LbEndpoint, converted from the data, to
+	// avoid recomputation
+	EnvoyEndpoint *endpoint.LbEndpoint
+
+	// ServiceAccount holds the associated service account.
+	ServiceAccount string
+
+	// Network holds the network where this endpoint is present
+	Network string
+}
+
 // ServiceAttributes represents a group of custom attributes of the service.
 type ServiceAttributes struct {
 	// Name is "destination.service.name" attribute
@@ -389,26 +433,6 @@ type ServiceDiscovery interface {
 	// GetService retrieves a service by host name if it exists
 	// Deprecated - do not use for anything other than tests
 	GetService(hostname Hostname) (*Service, error)
-
-	// Instances retrieves instances for a service and its ports that match
-	// any of the supplied labels. All instances match an empty tag list.
-	//
-	// For example, consider the example of catalog.mystore.com as described in NetworkEndpoints
-	// Instances(catalog.myservice.com, 80) ->
-	//      --> NetworkEndpoint(172.16.0.1:8888), Service(catalog.myservice.com), Labels(foo=bar)
-	//      --> NetworkEndpoint(172.16.0.2:8888), Service(catalog.myservice.com), Labels(foo=bar)
-	//      --> NetworkEndpoint(172.16.0.3:8888), Service(catalog.myservice.com), Labels(kitty=cat)
-	//      --> NetworkEndpoint(172.16.0.4:8888), Service(catalog.myservice.com), Labels(kitty=cat)
-	//
-	// Calling Instances with specific labels returns a trimmed list.
-	// e.g., Instances(catalog.myservice.com, 80, foo=bar) ->
-	//      --> NetworkEndpoint(172.16.0.1:8888), Service(catalog.myservice.com), Labels(foo=bar)
-	//      --> NetworkEndpoint(172.16.0.2:8888), Service(catalog.myservice.com), Labels(foo=bar)
-	//
-	// Similar concepts apply for calling this function with a specific
-	// port, hostname and labels.
-	// Deprecated: made obsolete by InstancesByPort
-	Instances(hostname Hostname, ports []string, labels LabelsCollection) ([]*ServiceInstance, error)
 
 	// InstancesByPort retrieves instances for a service on the given ports with labels that match
 	// any of the supplied labels. All instances match an empty tag list.
@@ -468,10 +492,11 @@ type ServiceDiscovery interface {
 }
 
 // ServiceAccounts exposes Istio service accounts
+// Deprecated - service account tracking moved to XdsServer, incremental.
 type ServiceAccounts interface {
 	// GetIstioServiceAccounts returns a list of service accounts looked up from
 	// the specified service hostname and ports.
-	GetIstioServiceAccounts(hostname Hostname, ports []string) []string
+	GetIstioServiceAccounts(hostname Hostname, ports []int) []string
 }
 
 // Matches returns true if this Hostname "matches" the other hostname. Hostnames match if:
@@ -482,8 +507,10 @@ type ServiceAccounts interface {
 //  Hostname("foo.com").Matches("foo.com")   = true
 //  Hostname("foo.com").Matches("bar.com")   = false
 //  Hostname("*.com").Matches("foo.com")     = true
-//  Hostname("*.com").Matches("foo.com")     = true
+//  Hostname("*.com").Matches("bar.com")     = true
 //  Hostname("*.foo.com").Matches("foo.com") = false
+//  Hostname("*").Matches("foo.com") = true
+//  Hostname("*").Matches("*.com") = true
 func (h Hostname) Matches(o Hostname) bool {
 	if len(h) == 0 && len(o) == 0 {
 		return true
@@ -519,6 +546,36 @@ func (h Hostname) Matches(o Hostname) bool {
 		return false
 	}
 	return matches
+}
+
+// SubsetOf returns true if this hostname is a valid subset of the other hostname. The semantics are
+// the same as "Matches", but only in one direction.
+func (h Hostname) SubsetOf(o Hostname) bool {
+	if len(h) == 0 && len(o) == 0 {
+		return true
+	}
+
+	hWildcard := string(h[0]) == "*"
+	oWildcard := string(o[0]) == "*"
+	if !oWildcard {
+		if hWildcard {
+			return false
+		}
+		return h == o
+	}
+
+	longer, shorter := string(h), string(o)
+	if hWildcard {
+		longer = string(h[1:])
+	}
+	if oWildcard {
+		shorter = string(o[1:])
+	}
+	if len(longer) < len(shorter) {
+		return false
+	}
+
+	return strings.HasSuffix(longer, shorter)
 }
 
 // Hostnames is a collection of Hostname; it exists so it's easy to sort hostnames consistently across Pilot.
@@ -658,7 +715,7 @@ func (ports PortList) GetByPort(num int) (*Port, bool) {
 
 // External predicate checks whether the service is external
 func (s *Service) External() bool {
-	return s.ExternalName != ""
+	return s.MeshExternal
 }
 
 // Key generates a unique string referencing service instances for a given port and labels.
@@ -756,6 +813,13 @@ func BuildSubsetKey(direction TrafficDirection, subsetName string, hostname Host
 	return fmt.Sprintf("%s|%d|%s|%s", direction, port, subsetName, hostname)
 }
 
+// BuildDNSSrvSubsetKey generates a unique string referencing service instances for a given service name, a subset and a port.
+// The proxy queries Pilot with this key to obtain the list of instances in a subset.
+// This is used only for the SNI-DNAT router. Do not use for other purposes.
+func BuildDNSSrvSubsetKey(direction TrafficDirection, subsetName string, hostname Hostname, port int) string {
+	return fmt.Sprintf("%s_.%d_.%s_.%s", direction, port, subsetName, hostname)
+}
+
 // IsValidSubsetKey checks if a string is valid for subset key parsing.
 func IsValidSubsetKey(s string) bool {
 	return strings.Count(s, "|") == 3
@@ -763,13 +827,31 @@ func IsValidSubsetKey(s string) bool {
 
 // ParseSubsetKey is the inverse of the BuildSubsetKey method
 func ParseSubsetKey(s string) (direction TrafficDirection, subsetName string, hostname Hostname, port int) {
-	parts := strings.Split(s, "|")
+	var parts []string
+	dnsSrvMode := false
+	// This could be the DNS srv form of the cluster that uses outbound_.port_.subset_.hostname
+	// Since we dont want every callsite to implement the logic to differentiate between the two forms
+	// we add an alternate parser here.
+	if strings.HasPrefix(s, fmt.Sprintf("%s_", TrafficDirectionOutbound)) ||
+		strings.HasPrefix(s, fmt.Sprintf("%s_", TrafficDirectionInbound)) {
+		parts = strings.SplitN(s, ".", 4)
+		dnsSrvMode = true
+	} else {
+		parts = strings.Split(s, "|")
+	}
+
 	if len(parts) < 4 {
 		return
 	}
-	direction = TrafficDirection(parts[0])
-	port, _ = strconv.Atoi(parts[1])
+
+	direction = TrafficDirection(strings.TrimSuffix(parts[0], "_"))
+	port, _ = strconv.Atoi(strings.TrimSuffix(parts[1], "_"))
 	subsetName = parts[2]
+
+	if dnsSrvMode {
+		subsetName = strings.TrimSuffix(parts[2], "_")
+	}
+
 	hostname = Hostname(parts[3])
 	return
 }

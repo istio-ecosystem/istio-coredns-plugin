@@ -1,4 +1,4 @@
-// Copyright 2018 Istio Authors. All Rights Reserved.
+// Copyright 2018 Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -97,7 +97,6 @@ static_resources:
   "context.protocol": "http",
   "context.reporter.kind": "outbound",
   "context.reporter.uid": "kubernetes://pod2.ns2",
-  "destination.service": "svc.ns3",
   "destination.service.host": "svc.ns3",
   "destination.service.name": "svc",
   "destination.service.namespace": "ns3",
@@ -116,7 +115,8 @@ static_resources:
   "request.time": "*",
   "request.useragent": "Go-http-client/1.1",
   "request.method": "GET",
-  "request.scheme": "http"
+  "request.scheme": "http",
+  "request.url_path": "/echo"
 }
 `
 	checkAttributesOkInbound = `
@@ -130,7 +130,6 @@ static_resources:
   "destination.port": "*",
   "destination.namespace": "ns2",
   "destination.uid": "kubernetes://pod1.ns2",
-  "destination.service": "svc.ns3",
   "destination.service.host": "svc.ns3",
   "destination.service.name": "svc",
   "destination.service.namespace": "ns3",
@@ -148,7 +147,8 @@ static_resources:
   "request.time": "*",
   "request.useragent": "Go-http-client/1.1",
   "request.method": "GET",
-  "request.scheme": "http"
+  "request.scheme": "http",
+  "request.url_path": "/echo"
 }
 `
 	reportAttributesOkOutbound = `
@@ -161,7 +161,6 @@ static_resources:
   "context.reporter.uid": "kubernetes://pod2.ns2",
   "destination.ip": "[127 0 0 1]",
   "destination.port": "*",
-  "destination.service": "svc.ns3",
   "destination.service.host": "svc.ns3",
   "destination.service.name": "svc",
   "destination.service.namespace": "ns3",
@@ -186,6 +185,7 @@ static_resources:
   "request.scheme": "http",
   "request.size": 0,
   "request.total_size": "*",
+  "request.url_path": "/echo",
   "response.time": "*",
   "response.size": 0,
   "response.duration": "*",
@@ -211,7 +211,6 @@ static_resources:
   "destination.port": "*",
   "destination.namespace": "ns2",
   "destination.uid": "kubernetes://pod1.ns2",
-  "destination.service": "svc.ns3",
   "destination.service.host": "svc.ns3",
   "destination.service.name": "svc",
   "destination.service.namespace": "ns3",
@@ -235,6 +234,7 @@ static_resources:
   "request.scheme": "http",
   "request.size": 0,
   "request.total_size": "*",
+  "request.url_path": "/echo",
   "response.time": "*",
   "response.size": 0,
   "response.duration": "*",
@@ -292,9 +292,6 @@ func (mock) GetProxyServiceInstances(_ *model.Proxy) ([]*model.ServiceInstance, 
 	return nil, nil
 }
 func (mock) GetService(_ model.Hostname) (*model.Service, error) { return nil, nil }
-func (mock) Instances(_ model.Hostname, _ []string, _ model.LabelsCollection) ([]*model.ServiceInstance, error) {
-	return nil, nil
-}
 func (mock) InstancesByPort(_ model.Hostname, _ int, _ model.LabelsCollection) ([]*model.ServiceInstance, error) {
 	return nil, nil
 }
@@ -335,7 +332,7 @@ var (
 			ID:   "pod1.ns2",
 			Type: model.Sidecar,
 			Metadata: map[string]string{
-				"ISTIO_PROXY_VERSION": "1.0",
+				"ISTIO_PROXY_VERSION": "1.1",
 			},
 		},
 		ServiceInstance: &model.ServiceInstance{Service: &svc},
@@ -348,7 +345,7 @@ var (
 			ID:   "pod2.ns2",
 			Type: model.Sidecar,
 			Metadata: map[string]string{
-				"ISTIO_PROXY_VERSION": "1.0",
+				"ISTIO_PROXY_VERSION": "1.1",
 			},
 		},
 		Service: &svc,

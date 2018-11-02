@@ -35,11 +35,13 @@ import (
 	"github.com/prometheus/client_golang/api/prometheus/v1"
 	"github.com/prometheus/common/model"
 
-	"istio.io/fortio/fhttp"
+	"fortio.org/fortio/fhttp"
 
-	// flog "istio.io/fortio/log"
-	"istio.io/fortio/periodic"
+	// flog "fortio.org/fortio/log"
+	"fortio.org/fortio/periodic"
+
 	"istio.io/istio/pkg/log"
+	"istio.io/istio/pkg/test/kube"
 	"istio.io/istio/tests/e2e/framework"
 	"istio.io/istio/tests/util"
 )
@@ -54,9 +56,9 @@ const (
 	sleepYaml             = "samples/sleep/sleep"
 	mixerTestDataDir      = "tests/e2e/tests/mixer/testdata"
 
-	prometheusPort   = "9090"
-	mixerMetricsPort = "42422"
-	productPagePort  = "10000"
+	prometheusPort   = uint16(9090)
+	mixerMetricsPort = uint16(42422)
+	productPagePort  = uint16(10000)
 
 	srcLabel           = "source_service"
 	srcPodLabel        = "source_pod"
@@ -293,7 +295,7 @@ func deleteAllRoutingConfig() error {
 
 type promProxy struct {
 	namespace        string
-	portFwdProcesses []*os.Process
+	portFwdProcesses []kube.PortForwarder
 }
 
 func newPromProxy(namespace string) *promProxy {
@@ -352,35 +354,36 @@ func podLogs(labelSelector string, container string) {
 }
 
 // portForward sets up local port forward to the pod specified by the "app" label
-func (p *promProxy) portForward(labelSelector string, localPort string, remotePort string) error {
-	var pod string
-	var err error
-	var proc *os.Process
-
-	getName := fmt.Sprintf("kubectl -n %s get pod -l %s -o jsonpath='{.items[0].metadata.name}'", p.namespace, labelSelector)
-	pod, err = util.Shell(getName)
-	if err != nil {
-		return err
-	}
-	log.Infof("%s pod name: %s", labelSelector, pod)
-
+func (p *promProxy) portForward(labelSelector string, localPort, remotePort uint16) error {
 	log.Infof("Setting up %s proxy", labelSelector)
-	portFwdCmd := fmt.Sprintf("kubectl port-forward %s %s:%s -n %s", strings.Trim(pod, "'"), localPort, remotePort, p.namespace)
-	log.Info(portFwdCmd)
-	if proc, err = util.RunBackground(portFwdCmd); err != nil {
-		log.Errorf("Failed to port forward: %s", err)
+	options := &kube.PodSelectOptions{
+		PodNamespace:  p.namespace,
+		LabelSelector: labelSelector,
+	}
+	accessor, err := kube.NewAccessor(tc.Kube.KubeConfig)
+	if err != nil {
+		log.Errorf("Error creating accessor: %v", err)
 		return err
 	}
-	p.portFwdProcesses = append(p.portFwdProcesses, proc)
+	forwarder, err := accessor.NewPortForwarder(options, localPort, remotePort)
+	if err != nil {
+		log.Errorf("Error creating port forwarder: %v", err)
+		return err
+	}
+	if err := forwarder.Start(); err != nil {
+		log.Errorf("Error starting port forwarder: %v", err)
+		return err
+	}
+	p.portFwdProcesses = append(p.portFwdProcesses, forwarder)
 
 	// Give it some time since process is launched in the background
 	time.Sleep(3 * time.Second)
-	if _, err = net.DialTimeout("tcp", ":"+localPort, 5*time.Second); err != nil {
+	if _, err = net.DialTimeout("tcp", forwarder.Address(), 5*time.Second); err != nil {
 		log.Errorf("Failed to port forward: %s", err)
 		return err
 	}
 
-	log.Infof("running %s port-forward in background, pid = %d", labelSelector, proc.Pid)
+	log.Infof("running %s port-forward in background", labelSelector)
 	return nil
 }
 
@@ -399,16 +402,13 @@ func (p *promProxy) Setup() error {
 		return err
 	}
 
-	return p.portForward("app=productpage", productPagePort, "9080")
+	return p.portForward("app=productpage", productPagePort, uint16(9080))
 }
 
 func (p *promProxy) Teardown() (err error) {
 	log.Info("Cleaning up mixer proxy")
-	for _, proc := range p.portFwdProcesses {
-		err := proc.Kill()
-		if err != nil {
-			log.Errorf("Failed to kill port-forward process, pid: %d", proc.Pid)
-		}
+	for _, pf := range p.portFwdProcesses {
+		pf.Close()
 	}
 	return
 }
@@ -789,7 +789,7 @@ func TestIngressCheckCache(t *testing.T) {
 		}
 		return nil
 	}
-	testCheckCache(t, visit)
+	testCheckCache(t, visit, "istio-ingressgateway")
 }
 
 func getIngressOrFail(t *testing.T) string {
@@ -809,12 +809,12 @@ func TestCheckCache(t *testing.T) {
 	visit := func() error {
 		return visitWithApp(url, pod, "sleep", 100)
 	}
-	testCheckCache(t, visit)
+	testCheckCache(t, visit, "productpage")
 }
 
 // testCheckCache verifies check cache is used when calling the given visit function
 // by comparing the check call metric.
-func testCheckCache(t *testing.T, visit func() error) {
+func testCheckCache(t *testing.T, visit func() error, app string) {
 	promAPI, err := promAPI()
 	if err != nil {
 		fatalf(t, "Could not build prometheus API client: %v", err)
@@ -822,7 +822,7 @@ func testCheckCache(t *testing.T, visit func() error) {
 
 	// Get check cache hit baseline.
 	t.Log("Query prometheus to get baseline cache hits...")
-	prior, err := getCheckCacheHits(promAPI)
+	prior, err := getCheckCacheHits(promAPI, app)
 	if err != nil {
 		fatalf(t, "Unable to retrieve valid cached hit number: %v", err)
 	}
@@ -836,7 +836,7 @@ func testCheckCache(t *testing.T, visit func() error) {
 	allowPrometheusSync()
 	t.Log("Query promethus to get new cache hits number...")
 	// Get new check cache hit.
-	got, err := getCheckCacheHits(promAPI)
+	got, err := getCheckCacheHits(promAPI, app)
 	if err != nil {
 		fatalf(t, "Unable to retrieve valid cached hit number: %v", err)
 	}
@@ -859,13 +859,13 @@ func fetchRequestCount(t *testing.T, promAPI v1.API, service string) (prior429s 
 		fatalf(t, "Could not get metrics from prometheus: %v", err)
 	}
 
-	prior429s, err = vectorValue(value, map[string]string{responseCodeLabel: "429", reporterLabel: "source"})
+	prior429s, err = vectorValue(value, map[string]string{responseCodeLabel: "429", reporterLabel: "destination"})
 	if err != nil {
 		t.Logf("error getting prior 429s, using 0 as value (msg: %v)", err)
 		prior429s = 0
 	}
 
-	prior200s, err = vectorValue(value, map[string]string{responseCodeLabel: "200", reporterLabel: "source"})
+	prior200s, err = vectorValue(value, map[string]string{responseCodeLabel: "200", reporterLabel: "destination"})
 	if err != nil {
 		t.Logf("error getting prior 200s, using 0 as value (msg: %v)", err)
 		prior200s = 0
@@ -1042,10 +1042,14 @@ func testRedisQuota(t *testing.T, quotaRule string) {
 		if err := util.KubeScale(tc.Kube.Namespace, "deployment/istio-policy", 1, tc.Kube.KubeConfig); err != nil {
 			t.Fatalf("Could not scale down istio-policy pod.: %v", err)
 		}
+		allowRuleSync()
 	}()
 
-	if err := tc.Kube.DeployTiller(); err != nil {
-		fatalf(t, "Failed to deploy helm tiller.")
+	// Deploy Tiller if not already running.
+	if err := util.CheckPodRunning("kube-system", "name=tiller", tc.Kube.KubeConfig); err != nil {
+		if errDeployTiller := tc.Kube.DeployTiller(); errDeployTiller != nil {
+			fatalf(t, "Failed to deploy helm tiller: %v", errDeployTiller)
+		}
 	}
 
 	setValue := "--set usePassword=false,persistence.enabled=false"
@@ -1079,6 +1083,8 @@ func testRedisQuota(t *testing.T, quotaRule string) {
 	}
 
 	// establish baseline
+	_ = sendTraffic(t, "Warming traffic...", 150)
+	allowPrometheusSync()
 	initPrior429s, _, _ := fetchRequestCount(t, promAPI, "ratings")
 
 	_ = sendTraffic(t, "Warming traffic...", 150)
@@ -1104,8 +1110,8 @@ func testRedisQuota(t *testing.T, quotaRule string) {
 	// consider only successful requests (as recorded at productpage service)
 	callsToRatings := succReqs
 
-	// the rate-limit is 1 rps
-	want200s := 1. * actualDuration
+	// the rate-limit is 0.1 rps from ratings to reviews.
+	want200s := 0.1 * actualDuration
 
 	// everything in excess of 200s should be 429s (ideally)
 	want429s := callsToRatings - want200s
@@ -1116,16 +1122,19 @@ func testRedisQuota(t *testing.T, quotaRule string) {
 	// then there is no way to determine if the rate limit was applied at all
 	// and for how much traffic. log all metrics and abort test.
 	if callsToRatings < want200s {
-		t.Logf("full set of prometheus metrics:\n%s", promDump(promAPI, "istio_requests_total"))
+		attributes := []string{fmt.Sprintf("%s=\"%s\"", destLabel, fqdn("ratings"))}
+		t.Logf("full set of prometheus metrics for ratings:\n%s", promDumpWithAttributes(promAPI, "istio_requests_total", attributes))
 		fatalf(t, "Not enough traffic generated to exercise rate limit: ratings_reqs=%f, want200s=%f", callsToRatings, want200s)
 	}
 
 	_, _, value := fetchRequestCount(t, promAPI, "ratings")
 	log.Infof("promvalue := %s", value.String())
 
-	got, err := vectorValue(value, map[string]string{responseCodeLabel: "429", reporterLabel: "source"})
+	got, err := vectorValue(value, map[string]string{responseCodeLabel: "429", reporterLabel: "destination"})
 	if err != nil {
-		t.Logf("prometheus values for istio_requests_total:\n%s", promDump(promAPI, "istio_requests_total"))
+		attributes := []string{fmt.Sprintf("%s=\"%s\"", destLabel, fqdn("ratings")),
+			fmt.Sprintf("%s=\"%d\"", responseCodeLabel, 429), fmt.Sprintf("%s=\"%s\"", reporterLabel, "destination")}
+		t.Logf("prometheus values for istio_requests_total for 429's:\n%s", promDumpWithAttributes(promAPI, "istio_requests_total", attributes))
 		errorf(t, "Could not find 429s: %v", err)
 		got = 0 // want to see 200 rate even if no 429s were recorded
 	}
@@ -1138,13 +1147,17 @@ func testRedisQuota(t *testing.T, quotaRule string) {
 
 	// check resource exhausted
 	if got < want {
-		t.Logf("prometheus values for istio_requests_total:\n%s", promDump(promAPI, "istio_requests_total"))
+		attributes := []string{fmt.Sprintf("%s=\"%s\"", destLabel, fqdn("ratings")),
+			fmt.Sprintf("%s=\"%d\"", responseCodeLabel, 429), fmt.Sprintf("%s=\"%s\"", reporterLabel, "destination")}
+		t.Logf("prometheus values for istio_requests_total for 429's:\n%s", promDumpWithAttributes(promAPI, "istio_requests_total", attributes))
 		errorf(t, "Bad metric value for rate-limited requests (429s): got %f, want at least %f", got, want)
 	}
 
-	got, err = vectorValue(value, map[string]string{responseCodeLabel: "200", reporterLabel: "source"})
+	got, err = vectorValue(value, map[string]string{responseCodeLabel: "200", reporterLabel: "destination"})
 	if err != nil {
-		t.Logf("prometheus values for istio_requests_total:\n%s", promDump(promAPI, "istio_requests_total"))
+		attributes := []string{fmt.Sprintf("%s=\"%s\"", destLabel, fqdn("ratings")),
+			fmt.Sprintf("%s=\"%d\"", responseCodeLabel, 200), fmt.Sprintf("%s=\"%s\"", reporterLabel, "destination")}
+		t.Logf("prometheus values for istio_requests_total for 200's:\n%s", promDumpWithAttributes(promAPI, "istio_requests_total", attributes))
 		errorf(t, "Could not find successes value: %v", err)
 		got = 0
 	}
@@ -1160,26 +1173,26 @@ func testRedisQuota(t *testing.T, quotaRule string) {
 
 	// check successes
 	if got < want {
-		t.Logf("prometheus values for istio_requests_total:\n%s", promDump(promAPI, "istio_requests_total"))
+		attributes := []string{fmt.Sprintf("%s=\"%s\"", destLabel, fqdn("ratings")),
+			fmt.Sprintf("%s=\"%d\"", responseCodeLabel, 200), fmt.Sprintf("%s=\"%s\"", reporterLabel, "destination")}
+		t.Logf("prometheus values for istio_requests_total for 200's:\n%s", promDumpWithAttributes(promAPI, "istio_requests_total", attributes))
 		errorf(t, "Bad metric value for successful requests (200s): got %f, want at least %f", got, want)
 	}
 	// TODO: until https://github.com/istio/istio/issues/3028 is fixed, use 25% - should be only 5% or so
 	want200s = math.Ceil(want200s * 1.5)
 	if got > want200s {
-		t.Logf("prometheus values for istio_requests_total:\n%s", promDump(promAPI, "istio_requests_total"))
+		attributes := []string{fmt.Sprintf("%s=\"%s\"", destLabel, fqdn("ratings")),
+			fmt.Sprintf("%s=\"%d\"", responseCodeLabel, 200), fmt.Sprintf("%s=\"%s\"", reporterLabel, "destination")}
+		t.Logf("prometheus values for istio_requests_total for 200's:\n%s", promDumpWithAttributes(promAPI, "istio_requests_total", attributes))
 		errorf(t, "Bad metric value for successful requests (200s): got %f, want at most %f", got, want200s)
 	}
 }
 
 func TestRedisQuotaRollingWindow(t *testing.T) {
-	t.Skip("https://github.com/istio/istio/issues/6309")
-
 	testRedisQuota(t, redisQuotaRollingWindowRule)
 }
 
 func TestRedisQuotaFixedWindow(t *testing.T) {
-	t.Skip("https://github.com/istio/istio/issues/6309")
-
 	testRedisQuota(t, redisQuotaFixedWindowRule)
 }
 
@@ -1258,7 +1271,7 @@ func allowPrometheusSync() {
 }
 
 func promAPI() (v1.API, error) {
-	client, err := api.NewClient(api.Config{Address: fmt.Sprintf("http://localhost:%s", prometheusPort)})
+	client, err := api.NewClient(api.Config{Address: fmt.Sprintf("http://localhost:%d", prometheusPort)})
 	if err != nil {
 		return nil, err
 	}
@@ -1272,6 +1285,19 @@ func promDump(client v1.API, metric string) string {
 		return value.String()
 	}
 	return ""
+}
+
+// promDumpWithAttributes is used to get all of the recorded values of a metric for particular attributes.
+// Attributes have to be of format %s=\"%s\"
+func promDumpWithAttributes(promAPI v1.API, metric string, attributes []string) string {
+	var err error
+	query := fmt.Sprintf("%s{%s}", metric, strings.Join(attributes, ", "))
+	value, err := promAPI.Query(context.Background(), query, time.Now())
+	if err != nil {
+		return ""
+	}
+
+	return value.String()
 }
 
 func vectorValue(val model.Value, labels map[string]string) (float64, error) {
@@ -1302,13 +1328,13 @@ func vectorValue(val model.Value, labels map[string]string) (float64, error) {
 // checkProductPageDirect
 func checkProductPageDirect() {
 	log.Info("checkProductPageDirect")
-	dumpURL("http://localhost:"+productPagePort+"/productpage", false)
+	dumpURL(fmt.Sprintf("http://localhost:%d/productpage", productPagePort), false)
 }
 
 // dumpMixerMetrics fetch metrics directly from mixer and dump them
 func dumpMixerMetrics() {
 	log.Info("dumpMixerMetrics")
-	dumpURL("http://localhost:"+mixerMetricsPort+"/metrics", true)
+	dumpURL(fmt.Sprintf("http://localhost:%d/metrics", mixerMetricsPort), true)
 }
 
 func dumpURL(url string, dumpContents bool) {
@@ -1402,7 +1428,7 @@ func visitProductPage(timeout time.Duration, wantStatus int, headers ...*header)
 
 // visitWithApp visits the given url by curl in the given container.
 func visitWithApp(url string, pod string, container string, num int) error {
-	cmd := fmt.Sprintf("kubectl exec %s -n %s -c %s -- bash -c 'for ((i=0; i<%d; i++)); do curl -m 0.1 -i -s %s; done'",
+	cmd := fmt.Sprintf("kubectl exec %s -n %s -c %s -- sh -c 'i=1; while [[ $i -le %d ]]; do curl -m 0.1 -i -s %s; let i=i+1; done'",
 		pod, tc.Kube.Namespace, container, num, url)
 	log.Infof("Visit %s for %d times with the following command: %v", url, num, cmd)
 	_, err := util.ShellMuteOutput(cmd)
@@ -1413,9 +1439,9 @@ func visitWithApp(url string, pod string, container string, num int) error {
 }
 
 // getCheckCacheHits returned the total number of check cache hits in this cluster.
-func getCheckCacheHits(promAPI v1.API) (float64, error) {
+func getCheckCacheHits(promAPI v1.API, app string) (float64, error) {
 	log.Info("Get number of cached check calls")
-	query := fmt.Sprintf("envoy_http_mixer_filter_total_check_calls")
+	query := fmt.Sprintf("sum(envoy_http_mixer_filter_total_check_calls{app=\"%s\"})", app)
 	log.Infof("prometheus query: %s", query)
 	value, err := promAPI.Query(context.Background(), query, time.Now())
 	if err != nil {
@@ -1428,7 +1454,7 @@ func getCheckCacheHits(promAPI v1.API) (float64, error) {
 		totalCheck = 0
 	}
 
-	query = fmt.Sprintf("envoy_http_mixer_filter_total_remote_check_calls")
+	query = fmt.Sprintf("sum(envoy_http_mixer_filter_total_remote_check_calls{app=\"%s\"})", app)
 	log.Infof("prometheus query: %s", query)
 	value, err = promAPI.Query(context.Background(), query, time.Now())
 	if err != nil {

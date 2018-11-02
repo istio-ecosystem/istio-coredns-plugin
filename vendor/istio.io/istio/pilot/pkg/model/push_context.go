@@ -16,6 +16,8 @@ package model
 
 import (
 	"encoding/json"
+	"fmt"
+	"sort"
 	"sync"
 	"time"
 
@@ -24,14 +26,13 @@ import (
 	networking "istio.io/api/networking/v1alpha3"
 )
 
-// PushContext tracks the status of a mush - metrics and errors.
+// PushContext tracks the status of a push - metrics and errors.
 // Metrics are reset after a push - at the beginning all
 // values are zero, and when push completes the status is reset.
 // The struct is exposed in a debug endpoint - fields public to allow
 // easy serialization as json.
 type PushContext struct {
-	mutex sync.Mutex
-
+	proxyStatusMutex sync.RWMutex
 	// ProxyStatus is keyed by the error code, and holds a map keyed
 	// by the ID.
 	ProxyStatus map[string]map[string]ProxyPushStatus
@@ -39,15 +40,12 @@ type PushContext struct {
 	// Start represents the time of last config change that reset the
 	// push status.
 	Start time.Time
+	End   time.Time
 
-	End time.Time
-
-	// ContextMutex is used to sync the data cache.
-	// Currently it is used directly - to avoid making copies of the
-	// structs. All data is set when the PushContext object is populated,
-	// from a single thread - only read locks are needed, data should not
-	// be changed by plugins
-	Mutex sync.RWMutex `json:"-,omitempty"`
+	// Mutex is used to protect the below store.
+	// All data is set when the PushContext object is populated in `InitContext`,
+	// data should not be changed by plugins.
+	Mutex sync.Mutex `json:"-,omitempty"`
 
 	// Services list all services in the system at the time push started.
 	Services []*Service `json:"-,omitempty"`
@@ -73,14 +71,67 @@ type PushContext struct {
 	VirtualServiceConfigs []Config `json:"-,omitempty"`
 
 	destinationRuleHosts   []Hostname
-	destinationRuleByHosts map[Hostname]*Config
+	destinationRuleByHosts map[Hostname]*combinedDestinationRule
 
 	//TODO: gateways              []*networking.Gateway
+
+	// AuthzPolicies stores the existing authorization policies in the cluster. Could be nil if there
+	// are no authorization policies in the cluster.
+	AuthzPolicies *AuthorizationPolicies
 
 	// Env has a pointer to the shared environment used to create the snapshot.
 	Env *Environment `json:"-,omitempty"`
 
+	// ServiceAccounts is a function mapping service name to service accounts.
+	ServiceAccounts func(string) []string `json:"-"`
+
+	// ServicePort2Name is used to keep track of service name and port mapping.
+	// This is needed because ADS names use port numbers, while endpoints use
+	// port names. The key is the service name. If a service or port are not found,
+	// the endpoint needs to be re-evaluated later (eventual consistency)
+	ServicePort2Name map[string]PortList `json:"-"`
+
 	initDone bool
+}
+
+// XDSUpdater is used for direct updates of the xDS model and incremental push.
+// Pilot uses multiple registries - for example each K8S cluster is a registry instance,
+// as well as consul and future EDS or MCP sources. Each registry is responsible for
+// tracking a set of endpoints associated with mesh services, and calling the EDSUpdate
+// on changes. A registry may group endpoints for a service in smaller subsets - for
+// example by deployment, or to deal with very large number of endpoints for a service.
+// We want to avoid passing around large objects - like full list of endpoints for a registry,
+// or the full list of endpoints for a service across registries, since it limits scalability.
+//
+// Future optimizations will include grouping the endpoints by labels, gateway or region to
+// reduce the time when subsetting or split-horizon is used. This desing assumes pilot
+// tracks all endpoints in the mesh and they fit in RAM - so limit is few M endpoints.
+// It is possible to split the endpoint tracking in future.
+type XDSUpdater interface {
+
+	// EDSUpdate is called when the list of endpoints or labels in a ServiceEntry is
+	// changed. For each cluster and hostname, the full list of active endpoints (including empty list)
+	// must be sent. The shard name is used as a key - current implementation is using the registry
+	// name.
+	EDSUpdate(shard, hostname string, entry []*IstioEndpoint) error
+
+	// SvcUpdate is called when a service port mapping definition is updated.
+	// This interface is WIP - labels, annotations and other changes to service may be
+	// updated to force a EDS and CDS recomputation and incremental push, as it doesn't affect
+	// LDS/RDS.
+	SvcUpdate(shard, hostname string, ports map[string]uint32, rports map[uint32]string)
+
+	// WorkloadUpdate is called by a registry when the labels or annotations on a workload have changed.
+	// The 'id' is the IP address of the pod for k8s if the pod is in the main/default network.
+	// In future it will include the 'network id' for pods in a different network, behind a zvpn gate.
+	// The IP is used because K8S Endpoints object associated with a Service only include the IP.
+	// We use Endpoints to track the membership to a service and readiness.
+	WorkloadUpdate(id string, labels map[string]string, annotations map[string]string)
+
+	// ConfigUpdate is called to notify the XDS server of config updates and request a push.
+	// The requests may be collapsed and throttled.
+	// This replaces the 'cache invalidation' model.
+	ConfigUpdate(full bool)
 }
 
 // ProxyPushStatus represents an event captured during config push to proxies.
@@ -94,6 +145,12 @@ type ProxyPushStatus struct {
 type PushMetric struct {
 	Name  string
 	gauge prometheus.Gauge
+}
+
+type combinedDestinationRule struct {
+	subsets map[string]bool // list of subsets seen so far
+	// We are not doing ports
+	config *Config
 }
 
 func newPushMetric(name, help string) *PushMetric {
@@ -115,8 +172,8 @@ func (ps *PushContext) Add(metric *PushMetric, key string, proxy *Proxy, msg str
 		log.Infof("Metric without context %s %v %s", key, proxy, msg)
 		return
 	}
-	ps.mutex.Lock()
-	defer ps.mutex.Unlock()
+	ps.proxyStatusMutex.Lock()
+	defer ps.proxyStatusMutex.Unlock()
 
 	metricMap, f := ps.ProxyStatus[metric.Name]
 	if !f {
@@ -131,6 +188,15 @@ func (ps *PushContext) Add(metric *PushMetric, key string, proxy *Proxy, msg str
 }
 
 var (
+
+	// EndpointNoPod tracks endpoints without an associated pod. This is an error condition, since
+	// we can't figure out the labels. It may be a transient problem, if endpoint is processed before
+	// pod.
+	EndpointNoPod = newPushMetric(
+		"endpoint_no_pod",
+		"Endpoints without an associated pod.",
+	)
+
 	// ProxyStatusNoService represents proxies not selected by any service
 	// This can be normal - for workloads that act only as client, or are not covered by a Service.
 	// It can also be an error, for example in cases the Endpoint list of a service was not updated by the time
@@ -177,6 +243,12 @@ var (
 		"Number of conflicting inbound listeners.",
 	)
 
+	// DuplicatedClusters tracks duplicate clusters seen while computing CDS
+	DuplicatedClusters = newPushMetric(
+		"pilot_duplicate_envoy_clusters",
+		"Duplicate envoy clusters caused by service entries with same hostname",
+	)
+
 	// ProxyStatusClusterNoInstances tracks clusters (services) without workloads.
 	ProxyStatusClusterNoInstances = newPushMetric(
 		"pilot_eds_no_instances",
@@ -189,6 +261,12 @@ var (
 		"Virtual services with dup domains.",
 	)
 
+	// DuplicatedSubsets tracks duplicate subsets that we rejected while merging multiple destination rules for same host
+	DuplicatedSubsets = newPushMetric(
+		"pilot_destrule_subsets",
+		"Duplicate subsets across destination rules for same host",
+	)
+
 	// LastPushStatus preserves the metrics and data collected during lasts global push.
 	// It can be used by debugging tools to inspect the push event. It will be reset after each push with the
 	// new version.
@@ -198,12 +276,13 @@ var (
 	metrics []*PushMetric
 )
 
-// NewStatus creates a new PushContext structure to track push status.
-func NewStatus() *PushContext {
+// NewPushContext creates a new PushContext structure to track push status.
+func NewPushContext() *PushContext {
 	// TODO: detect push in progress, don't update status if set
 	return &PushContext{
 		ServiceByHostname: map[Hostname]*Service{},
 		ProxyStatus:       map[string]map[string]ProxyPushStatus{},
+		ServicePort2Name:  map[string]PortList{},
 		Start:             time.Now(),
 	}
 }
@@ -213,8 +292,8 @@ func (ps *PushContext) JSON() ([]byte, error) {
 	if ps == nil {
 		return []byte{'{', '}'}, nil
 	}
-	ps.mutex.Lock()
-	defer ps.mutex.Unlock()
+	ps.proxyStatusMutex.RLock()
+	defer ps.proxyStatusMutex.RUnlock()
 	return json.MarshalIndent(ps, "", "    ")
 }
 
@@ -227,8 +306,8 @@ func (ps *PushContext) OnConfigChange() {
 // UpdateMetrics will update the prometheus metrics based on the
 // current status of the push.
 func (ps *PushContext) UpdateMetrics() {
-	ps.mutex.Lock()
-	defer ps.mutex.Unlock()
+	ps.proxyStatusMutex.RLock()
+	defer ps.proxyStatusMutex.RUnlock()
 
 	for _, pm := range metrics {
 		mmap, f := ps.ProxyStatus[pm.Name]
@@ -293,6 +372,11 @@ func (ps *PushContext) InitContext(env *Environment) error {
 		return err
 	}
 
+	if err = ps.initAuthorizationPolicies(env); err != nil {
+		rbacLog.Errorf("failed to initialize authorization policies: %v", err)
+		return err
+	}
+
 	// TODO: everything else that is used in config generation - the generation
 	// should not have any deps on config store.
 	ps.initDone = true
@@ -306,11 +390,21 @@ func (ps *PushContext) initServiceRegistry(env *Environment) error {
 	if err != nil {
 		return err
 	}
-	ps.Services = services
+	// Sort the services in order of creation.
+	ps.Services = sortServicesByCreationTime(services)
 	for _, s := range services {
 		ps.ServiceByHostname[s.Hostname] = s
+		ps.ServicePort2Name[string(s.Hostname)] = s.Ports
 	}
 	return nil
+}
+
+// sortServicesByCreationTime sorts the list of services in ascending order by their creation time (if available).
+func sortServicesByCreationTime(services []*Service) []*Service {
+	sort.SliceStable(services, func(i, j int) bool {
+		return services[i].CreationTime.Before(services[j].CreationTime)
+	})
+	return services
 }
 
 // Caches list of virtual services
@@ -395,23 +489,58 @@ func (ps *PushContext) initDestinationRules(env *Environment) error {
 // Split out of DestinationRule expensive conversions, computed once per push.
 // This also allows tests to inject a config without having the mock.
 func (ps *PushContext) SetDestinationRules(configs []Config) {
+	// Sort by time first. So if two destination rule have top level traffic policies
+	// we take the first one.
 	sortConfigByCreationTime(configs)
-	hosts := make([]Hostname, len(configs))
-	byHosts := make(map[Hostname]*Config, len(configs))
+	hosts := make([]Hostname, 0)
+	combinedDestinationRuleMap := make(map[Hostname]*combinedDestinationRule, len(configs))
+
 	for i := range configs {
 		rule := configs[i].Spec.(*networking.DestinationRule)
-		hosts[i] = ResolveShortnameToFQDN(rule.Host, configs[i].ConfigMeta)
-		byHosts[hosts[i]] = &configs[i]
+		resolvedHost := ResolveShortnameToFQDN(rule.Host, configs[i].ConfigMeta)
+		if mdr, exists := combinedDestinationRuleMap[resolvedHost]; exists {
+			combinedRule := mdr.config.Spec.(*networking.DestinationRule)
+			// we have an another destination rule for same host.
+			// concatenate both of them -- essentially add subsets from one to other.
+			for _, subset := range rule.Subsets {
+				if _, subsetExists := mdr.subsets[subset.Name]; !subsetExists {
+					mdr.subsets[subset.Name] = true
+					combinedRule.Subsets = append(combinedRule.Subsets, subset)
+				} else {
+					ps.Add(DuplicatedSubsets, string(resolvedHost), nil,
+						fmt.Sprintf("Duplicate subset %s found while merging destination rules for %s",
+							subset.Name, string(resolvedHost)))
+				}
+
+				// If there is no top level policy and the incoming rule has top level
+				// traffic policy, use the one from the incoming rule.
+				if combinedRule.TrafficPolicy == nil && rule.TrafficPolicy != nil {
+					combinedRule.TrafficPolicy = rule.TrafficPolicy
+				}
+			}
+			continue
+		}
+
+		combinedDestinationRuleMap[resolvedHost] = &combinedDestinationRule{
+			subsets: make(map[string]bool),
+			config:  &configs[i],
+		}
+		for _, subset := range rule.Subsets {
+			combinedDestinationRuleMap[resolvedHost].subsets[subset.Name] = true
+		}
+		hosts = append(hosts, resolvedHost)
 	}
 
+	// presort it so that we don't sort it for each DestinationRule call.
+	sort.Sort(Hostnames(hosts))
 	ps.destinationRuleHosts = hosts
-	ps.destinationRuleByHosts = byHosts
+	ps.destinationRuleByHosts = combinedDestinationRuleMap
 }
 
 // DestinationRule returns a destination rule for a service name in a given domain.
 func (ps *PushContext) DestinationRule(hostname Hostname) *Config {
 	if c, ok := MostSpecificHostMatch(hostname, ps.destinationRuleHosts); ok {
-		return ps.destinationRuleByHosts[c]
+		return ps.destinationRuleByHosts[c].config
 	}
 	return nil
 }
@@ -435,5 +564,14 @@ func (ps *PushContext) SubsetToLabels(subsetName string, hostname Hostname) Labe
 		}
 	}
 
+	return nil
+}
+
+func (ps *PushContext) initAuthorizationPolicies(env *Environment) error {
+	var err error
+	if ps.AuthzPolicies, err = NewAuthzPolicies(env); err != nil {
+		rbacLog.Errorf("failed to initialize authorization policies: %v", err)
+		return err
+	}
 	return nil
 }

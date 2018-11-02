@@ -72,6 +72,7 @@ var levelToZap = map[Level]zapcore.Level{
 	InfoLevel:  zapcore.InfoLevel,
 	WarnLevel:  zapcore.WarnLevel,
 	ErrorLevel: zapcore.ErrorLevel,
+	FatalLevel: zapcore.FatalLevel,
 	NoneLevel:  none,
 }
 
@@ -108,8 +109,8 @@ func prepZap(options *Options) (zapcore.Core, zapcore.Core, zapcore.WriteSyncer,
 		rotaterSink = zapcore.AddSync(&lumberjack.Logger{
 			Filename:   options.RotateOutputPath,
 			MaxSize:    options.RotationMaxSize,
-			MaxBackups: options.RotationMaxAge,
-			MaxAge:     options.RotationMaxBackups,
+			MaxBackups: options.RotationMaxBackups,
+			MaxAge:     options.RotationMaxAge,
 		})
 	}
 

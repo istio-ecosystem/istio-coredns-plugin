@@ -1,4 +1,4 @@
-// Copyright 2017 Istio Authors. All Rights Reserved.
+// Copyright 2017 Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -31,6 +31,7 @@ const (
 const checkAttributesMixerFail = `
 {
   "context.protocol": "http",
+  "context.reporter.uid": "",
   "mesh1.ip": "[1 1 1 1]",
   "mesh2.ip": "[0 0 0 0 0 0 0 0 0 0 255 255 204 152 189 116]",
   "mesh3.ip": "[0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 8]",
@@ -40,8 +41,11 @@ const checkAttributesMixerFail = `
   "request.useragent": "Go-http-client/1.1",
   "request.method": "GET",
   "request.scheme": "http",
+  "request.url_path": "/echo",
   "source.uid": "POD11",
   "source.namespace": "XYZ11",
+  "destination.uid": "",
+  "destination.namespace": "",
   "target.name": "target-name",
   "target.user": "target-user",
   "target.uid": "POD222",
@@ -65,7 +69,8 @@ const reportAttributesMixerFail = `
   "check.error_code": 16,
   "check.error_message": "UNAUTHENTICATED:Unauthenticated by mixer.",
   "context.protocol": "http",
-  "context.proxy_error_code": "-",
+  "context.proxy_error_code": "UAEX",
+  "context.reporter.uid": "",
   "mesh1.ip": "[1 1 1 1]",
   "mesh2.ip": "[0 0 0 0 0 0 0 0 0 0 255 255 204 152 189 116]",
   "mesh3.ip": "[0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 8]",
@@ -75,8 +80,11 @@ const reportAttributesMixerFail = `
   "request.useragent": "Go-http-client/1.1",
   "request.method": "GET",
   "request.scheme": "http",
+  "request.url_path": "/echo",
   "source.uid": "POD11",
   "source.namespace": "XYZ11",
+  "destination.uid": "",
+  "destination.namespace": "",
   "target.name": "target-name",
   "target.user": "target-user",
   "target.uid": "POD222",
@@ -115,6 +123,7 @@ const reportAttributesBackendFail = `
 {
   "context.protocol": "http",
   "context.proxy_error_code": "-",
+  "context.reporter.uid": "",
   "mesh1.ip": "[1 1 1 1]",
   "mesh2.ip": "[0 0 0 0 0 0 0 0 0 0 255 255 204 152 189 116]",
   "mesh3.ip": "[0 1 0 0 0 0 0 0 0 0 0 0 0 0 0 8]",
@@ -124,10 +133,13 @@ const reportAttributesBackendFail = `
   "request.useragent": "Go-http-client/1.1",
   "request.method": "GET",
   "request.scheme": "http",
+  "request.url_path": "/echo",
   "source.uid": "POD11",
   "source.namespace": "XYZ11",
   "destination.ip": "[127 0 0 1]",
   "destination.port": "*",
+  "destination.uid": "",
+  "destination.namespace": "",
   "target.name": "target-name",
   "target.user": "target-user",
   "target.uid": "POD222",

@@ -489,8 +489,8 @@ func TestTimeout(t *testing.T) {
 	done := make(chan struct{}, 2)
 
 	timeout := time.Millisecond
-	allowable := timeout + (10 * time.Millisecond)
-	abortAfter := timeout + (100 * time.Millisecond)
+	allowable := timeout + 10*time.Millisecond
+	abortAfter := timeout + 100*time.Millisecond
 
 	start := time.Now()
 
@@ -539,8 +539,9 @@ func TestConcurrentExchanges(t *testing.T) {
 		block := make(chan struct{})
 		waiting := make(chan struct{})
 
+		mm := m // redeclare m so as not to trip the race detector
 		handler := func(w ResponseWriter, req *Msg) {
-			r := m.Copy()
+			r := mm.Copy()
 			r.SetReply(req)
 
 			waiting <- struct{}{}
@@ -605,8 +606,6 @@ func TestDoHExchange(t *testing.T) {
 	if r == nil || r.Rcode != RcodeSuccess {
 		t.Errorf("failed to get an valid answer\n%v", r)
 	}
-
-	t.Log(r)
 
 	// TODO: proper tests for this
 }

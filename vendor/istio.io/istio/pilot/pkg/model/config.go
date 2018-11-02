@@ -19,9 +19,9 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/gogo/protobuf/proto"
-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	authn "istio.io/api/authentication/v1alpha1"
 	mccpb "istio.io/api/mixer/v1/config/client"
@@ -83,7 +83,7 @@ type ConfigMeta struct {
 	ResourceVersion string `json:"resourceVersion,omitempty"`
 
 	// CreationTimestamp records the creation time
-	CreationTimestamp meta_v1.Time `json:"creationTimestamp,omitempty"`
+	CreationTimestamp time.Time `json:"creationTimestamp,omitempty"`
 }
 
 // Config is a configuration unit consisting of the type of configuration, the
@@ -130,7 +130,7 @@ type ConfigStore interface {
 	ConfigDescriptor() ConfigDescriptor
 
 	// Get retrieves a configuration element by a type and a key
-	Get(typ, name, namespace string) (config *Config, exists bool)
+	Get(typ, name, namespace string) *Config
 
 	// List returns objects by type and namespace.
 	// Use "" for the namespace to list across namespaces.
@@ -240,6 +240,8 @@ func (descriptor ConfigDescriptor) GetByType(name string) (ProtoSchema, bool) {
 
 // IstioConfigStore is a specialized interface to access config store using
 // Istio configuration types
+// nolint
+//go:generate $GOPATH/src/istio.io/istio/bin/counterfeiter.sh -o $GOPATH/src/istio.io/istio/pilot/pkg/networking/core/v1alpha3/fakes/fake_istio_config_store.go --fake-name IstioConfigStore . IstioConfigStore
 type IstioConfigStore interface {
 	ConfigStore
 
@@ -276,6 +278,9 @@ type IstioConfigStore interface {
 
 	// RbacConfig selects the RbacConfig of name DefaultRbacConfigName.
 	RbacConfig() *Config
+
+	// ClusterRbacConfig selects the ClusterRbacConfig of name DefaultRbacConfigName.
+	ClusterRbacConfig() *Config
 }
 
 const (
@@ -457,14 +462,26 @@ var (
 	}
 
 	// RbacConfig describes the mesh level RBAC config.
+	// Deprecated, use ClusterRbacConfig instead.
+	// See https://github.com/istio/istio/issues/8825 for more details.
 	RbacConfig = ProtoSchema{
+		Type:        "rbac-config",
+		Plural:      "rbac-configs",
+		Group:       "rbac",
+		Version:     "v1alpha1",
+		MessageName: "istio.rbac.v1alpha1.RbacConfig",
+		Validate:    ValidateRbacConfig,
+	}
+
+	// ClusterRbacConfig describes the cluster level RBAC config.
+	ClusterRbacConfig = ProtoSchema{
 		ClusterScoped: true,
-		Type:          "rbac-config",
-		Plural:        "rbac-configs",
+		Type:          "cluster-rbac-config",
+		Plural:        "cluster-rbac-configs",
 		Group:         "rbac",
 		Version:       "v1alpha1",
 		MessageName:   "istio.rbac.v1alpha1.RbacConfig",
-		Validate:      ValidateRbacConfig,
+		Validate:      ValidateClusterRbacConfig,
 	}
 
 	// IstioConfigTypes lists all Istio config types with schemas and validation
@@ -483,6 +500,7 @@ var (
 		ServiceRole,
 		ServiceRoleBinding,
 		RbacConfig,
+		ClusterRbacConfig,
 	}
 )
 
@@ -541,7 +559,6 @@ func ResolveShortnameToFQDN(host string, meta ConfigMeta) Hostname {
 // MostSpecificHostMatch compares the elements of the stack to the needle, and returns the longest stack element
 // matching the needle, or false if no element in the stack matches the needle.
 func MostSpecificHostMatch(needle Hostname, stack []Hostname) (Hostname, bool) {
-	sort.Sort(Hostnames(stack))
 	for _, h := range stack {
 		if needle.Matches(h) {
 			return h, true
@@ -574,7 +591,7 @@ func (store *istioConfigStore) ServiceEntries() []Config {
 // sortConfigByCreationTime sorts the list of config objects in ascending order by their creation time (if available).
 func sortConfigByCreationTime(configs []Config) []Config {
 	sort.SliceStable(configs, func(i, j int) bool {
-		return configs[i].CreationTimestamp.Before(&configs[j].CreationTimestamp)
+		return configs[i].CreationTimestamp.Before(configs[j].CreationTimestamp)
 	})
 	return configs
 }
@@ -624,6 +641,7 @@ func (store *istioConfigStore) EnvoyFilter(workloadLabels LabelsCollection) *Con
 				continue
 			}
 		}
+		mergedFilterConfig.WorkloadLabels = make(map[string]string)
 		mergedFilterConfig.Filters = append(mergedFilterConfig.Filters, filter.Filters...)
 	}
 
@@ -885,17 +903,31 @@ func (store *istioConfigStore) ServiceRoleBindings(namespace string) []Config {
 	return bindings
 }
 
+func (store *istioConfigStore) ClusterRbacConfig() *Config {
+	clusterRbacConfig, err := store.List(ClusterRbacConfig.Type, "")
+	if err != nil {
+		log.Errorf("failed to get ClusterRbacConfig: %v", err)
+	}
+	for _, rc := range clusterRbacConfig {
+		if rc.Name == DefaultRbacConfigName {
+			return &rc
+		}
+	}
+	return nil
+}
+
 func (store *istioConfigStore) RbacConfig() *Config {
 	rbacConfigs, err := store.List(RbacConfig.Type, "")
 	if err != nil {
-		log.Errorf("failed to get rbacConfig: %v", err)
 		return nil
 	}
+
 	if len(rbacConfigs) > 1 {
 		log.Errorf("found %d RbacConfigs, expecting only 1.", len(rbacConfigs))
 	}
 	for _, rc := range rbacConfigs {
 		if rc.Name == DefaultRbacConfigName {
+			log.Warnf("RbacConfig is deprecated, Use ClusterRbacConfig instead.")
 			return &rc
 		}
 	}

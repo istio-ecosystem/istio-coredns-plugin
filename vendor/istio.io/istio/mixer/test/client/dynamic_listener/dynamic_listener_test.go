@@ -1,4 +1,4 @@
-// Copyright 2018 Istio Authors. All Rights Reserved.
+// Copyright 2018 Istio Authors
 //
 // Licensed under the Apache License, Version 2.0 (the "License");
 // you may not use this file except in compliance with the License.
@@ -86,6 +86,7 @@ static_resources:
 // Check attributes from a good GET request
 const checkAttributesOkGet = `
 {
+  "context.reporter.uid": "",
   "connection.mtls": false,
   "origin.ip": "[127 0 0 1]",
   "context.protocol": "http",
@@ -97,6 +98,9 @@ const checkAttributesOkGet = `
   "request.useragent": "Go-http-client/1.1",
   "request.method": "GET",
   "request.scheme": "http",
+  "request.url_path": "/echo",
+  "destination.uid": "",
+  "destination.namespace": "",
   "target.namespace": "XYZ222",
   "target.uid": "POD222",
   "request.headers": {

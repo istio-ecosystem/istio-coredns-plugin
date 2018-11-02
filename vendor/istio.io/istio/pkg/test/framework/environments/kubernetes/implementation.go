@@ -17,45 +17,39 @@ package kubernetes
 import (
 	"fmt"
 	"io"
+	"os"
+	"path"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/hashicorp/go-multierror"
 	"k8s.io/client-go/rest"
 
-	"istio.io/istio/pkg/log"
+	"istio.io/istio/pkg/test/deployment"
 	"istio.io/istio/pkg/test/framework/environment"
 	"istio.io/istio/pkg/test/framework/internal"
+	"istio.io/istio/pkg/test/framework/scopes"
 	"istio.io/istio/pkg/test/framework/settings"
 	"istio.io/istio/pkg/test/framework/tmpl"
 	"istio.io/istio/pkg/test/kube"
 )
 
-var scope = log.RegisterScope("testframework", "General scope for the test framework", 0)
-
 // Implementation is the implementation of a kubernetes environment. It implements environment.Implementation,
 // and also hosts publicly accessible methods that are specific to cluster environment.
 type Implementation struct {
-	ctx environment.ComponentContext
+	kube *Settings
+	ctx  environment.ComponentContext
 
 	Accessor *kube.Accessor
 
 	// Both rest.Config and kube config path is used by different parts of the code.
 	config *rest.Config
 
-	// The namespace where the Istio components reside in a typical deployment. This is typically
-	// "istio-system" in a standard deployment.
-	IstioSystemNamespace string
+	systemNamespace     *namespace
+	dependencyNamespace *namespace
+	testNamespace       *namespace
 
-	// The namespace in which dependency components are deployed. This namespace is created once per run,
-	// and does not get destroyed until all the tests run. Test framework dependencies can deploy
-	// components here when they get initialized. They will get deployed only once.
-	DependencyNamespace string
-
-	// The namespace for each individual test. These namespaces are created when an environment is acquired
-	// in a test, and the previous one gets deleted. This ensures that during a single test run, there is only
-	// one test namespace in the system.
-	TestNamespace string
+	deployment *deployment.Instance
 }
 
 var _ internal.EnvironmentController = &Implementation{}
@@ -67,6 +61,18 @@ func New() *Implementation {
 	return &Implementation{}
 }
 
+// KubeSettings for this environment.
+func (e *Implementation) KubeSettings() *Settings {
+	// Copy the settings.
+	s := &(*e.kube)
+
+	// Overwrite the namespaces with the allocated name.
+	s.IstioSystemNamespace = e.systemNamespace.allocatedName
+	s.DependencyNamespace = e.dependencyNamespace.allocatedName
+	s.TestNamespace = e.testNamespace.allocatedName
+	return s
+}
+
 // EnvironmentID is the name of this environment implementation.
 func (e *Implementation) EnvironmentID() settings.EnvironmentID {
 	return settings.Kubernetes
@@ -74,24 +80,81 @@ func (e *Implementation) EnvironmentID() settings.EnvironmentID {
 
 // Initialize the environment. This is called once during the lifetime of the suite.
 func (e *Implementation) Initialize(ctx *internal.TestContext) error {
-	config, err := kube.CreateConfig(ctx.Settings().KubeConfig)
+	var err error
+	e.kube, err = newSettings()
 	if err != nil {
 		return err
 	}
 
-	if e.Accessor, err = kube.NewAccessor(config); err != nil {
+	scopes.CI.Infof("Test Framework Kubernetes environment settings:\n%s", e.kube)
+
+	if e.Accessor, err = kube.NewAccessor(e.kube.KubeConfig); err != nil {
 		return err
 	}
 
 	e.ctx = ctx
 
-	return e.allocateDependencyNamespace()
+	// Create the namespace objects.
+	e.systemNamespace = &namespace{
+		name:             e.kube.IstioSystemNamespace,
+		annotation:       "system-namespace",
+		accessor:         e.Accessor,
+		injectionEnabled: false,
+	}
+	e.dependencyNamespace = &namespace{
+		name:             e.kube.DependencyNamespace,
+		annotation:       "dep-namespace",
+		accessor:         e.Accessor,
+		injectionEnabled: true,
+	}
+	e.testNamespace = &namespace{
+		name:             e.kube.TestNamespace,
+		annotation:       "test-namespace",
+		accessor:         e.Accessor,
+		injectionEnabled: false,
+	}
+
+	if err := e.systemNamespace.allocate(); err != nil {
+		return err
+	}
+	if err := e.dependencyNamespace.allocate(); err != nil {
+		return err
+	}
+
+	if e.kube.DeployIstio {
+		if e.deployment, err = e.deployIstio(); err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func (e *Implementation) deployIstio() (instance *deployment.Instance, err error) {
+	scopes.CI.Info("=== BEGIN: Deploy Istio (via Helm Template) ===")
+	defer func() {
+		if err != nil {
+			instance = nil
+			scopes.CI.Infof("=== FAILED: Deploy Istio ===")
+		} else {
+			scopes.CI.Infof("=== SUCCEEDED: Deploy Istio ===")
+		}
+	}()
+
+	return deployment.NewHelmDeployment(deployment.HelmConfig{
+		Accessor:   e.Accessor,
+		Namespace:  e.systemNamespace.allocatedName,
+		WorkDir:    e.ctx.Settings().WorkDir,
+		ChartDir:   e.kube.ChartDir,
+		ValuesFile: e.kube.ValuesFile,
+		Values:     e.kube.Values,
+	})
 }
 
 // Configure applies the given configuration to the mesh.
 func (e *Implementation) Configure(config string) error {
-	scope.Debugf("Applying configuration: \n%s\n", config)
-	err := kube.ApplyContents(e.ctx.Settings().KubeConfig, e.TestNamespace, config)
+	scopes.Framework.Debugf("Applying configuration: \n%s\n", config)
+	err := e.Accessor.ApplyContents(e.testNamespace.allocatedName, config)
 	if err != nil {
 		return err
 	}
@@ -107,8 +170,9 @@ func (e *Implementation) Configure(config string) error {
 // Evaluate the template against standard set of parameters. See template.Parameters for details.
 func (e *Implementation) Evaluate(template string) (string, error) {
 	p := tmpl.Parameters{
-		TestNamespace:       e.TestNamespace,
-		DependencyNamespace: e.DependencyNamespace,
+		IstioSystemNamespace: e.systemNamespace.allocatedName,
+		TestNamespace:        e.testNamespace.allocatedName,
+		DependencyNamespace:  e.dependencyNamespace.allocatedName,
 	}
 
 	return tmpl.Evaluate(template, p)
@@ -116,79 +180,119 @@ func (e *Implementation) Evaluate(template string) (string, error) {
 
 // Reset the environment before starting another test.
 func (e *Implementation) Reset() error {
-	scope.Debug("Resetting environment")
+	scopes.Framework.Debug("Resetting environment")
 
-	if err := e.deleteTestNamespace(); err != nil {
-		return err
-	}
-
-	if err := e.allocateTestNamespace(); err != nil {
+	// Re-allocate the test namespace.
+	if err := e.testNamespace.allocate(); err != nil {
 		return err
 	}
 
 	return nil
 }
 
-func (e *Implementation) deleteTestNamespace() error {
-	if e.TestNamespace == "" {
-		return nil
+// DumpState dumps the state of the environment to the file system and the log.
+func (e *Implementation) DumpState(context string) {
+	scopes.CI.Infof("=== BEGIN: Dump state (%s) ===", context)
+	defer func() {
+		scopes.CI.Infof("=== COMPLETED: Dump state (%s) ===", context)
+	}()
+
+	dir := path.Join(e.ctx.Settings().WorkDir, context)
+	_, err := os.Stat(dir)
+	if err != nil && os.IsNotExist(err) {
+		err = os.Mkdir(dir, os.ModePerm)
 	}
 
-	ns := e.TestNamespace
-	err := e.Accessor.DeleteNamespace(ns)
-	if err == nil {
-		e.TestNamespace = ""
+	if err != nil {
+		scopes.Framework.Errorf("Unable to create folder to dump logs: %v", err)
+		return
+	}
 
-		// TODO: Waiting for deletion is taking a long time. This is probably not
-		// needed for the general case. We should consider simply not doing this.
-		// err = e.Accessor.WaitForNamespaceDeletion(ns)
+	deployment.DumpPodData(dir, e.KubeSettings().IstioSystemNamespace, e.Accessor)
+	deployment.DumpPodState(e.KubeSettings().IstioSystemNamespace, e.Accessor)
+
+	if e.dependencyNamespace.allocatedName == "" {
+		scopes.CI.Info("Skipping state dump of dependency namespace, as it is not allocated...")
+	} else {
+		deployment.DumpPodData(dir, e.dependencyNamespace.allocatedName, e.Accessor)
+		deployment.DumpPodState(e.dependencyNamespace.allocatedName, e.Accessor)
+	}
+
+	if e.testNamespace.allocatedName == "" {
+		scopes.CI.Info("Skipping state dump of test namespace, as it is not allocated...")
+	} else {
+		deployment.DumpPodData(dir, e.testNamespace.allocatedName, e.Accessor)
+		deployment.DumpPodState(e.testNamespace.allocatedName, e.Accessor)
+	}
+}
+
+// Close implementation.
+func (e *Implementation) Close() error {
+	var err error
+	for _, ns := range []*namespace{e.testNamespace, e.dependencyNamespace, e.systemNamespace} {
+		if e := ns.Close(); e != nil {
+			err = multierror.Append(err, e)
+		}
+	}
+
+	if e.deployment != nil {
+		// TODO: Deleting the deployment is extremely noisy. It is outputting a whole slew of errors
+		// Disabling the collection of errors from Delete for the time being.
+		_ = e.deployment.Delete(e.Accessor, true)
+		//if err2 := e.deployment.Delete(); err2 != nil {
+		//	err = multierror.Append(err, err2)
+		//}
+		e.deployment = nil
 	}
 
 	return err
 }
 
-func (e *Implementation) allocateTestNamespace() error {
-	ns := fmt.Sprintf("test-%s", uuid.New().String())
+type namespace struct {
+	name             string
+	annotation       string
+	allocatedName    string
+	created          bool
+	accessor         *kube.Accessor
+	injectionEnabled bool
+}
 
-	err := e.Accessor.CreateNamespace(ns, "test-namespace")
-	if err != nil {
+func (n *namespace) allocate() error {
+	// Close if previously allocated
+	if err := n.Close(); err != nil {
 		return err
 	}
 
-	e.TestNamespace = ns
+	nameToAllocate := n.getNameToAllocate()
+
+	// Only create the namespace if it doesn't already exist.
+	if !n.accessor.NamespaceExists(nameToAllocate) {
+		err := n.accessor.CreateNamespace(nameToAllocate, n.annotation, n.injectionEnabled)
+		if err != nil {
+			return err
+		}
+		n.created = true
+	}
+
+	n.allocatedName = nameToAllocate
 	return nil
 }
 
-func (e *Implementation) allocateDependencyNamespace() error {
-	ns := fmt.Sprintf("dep-%s", uuid.New().String())
-
-	err := e.Accessor.CreateNamespace(ns, "dep-namespace")
-	if err != nil {
-		return err
+// Close implements io.Closer interface.
+func (n *namespace) Close() error {
+	if n.created {
+		defer func() {
+			n.allocatedName = ""
+			n.created = false
+		}()
+		return n.accessor.DeleteNamespace(n.allocatedName)
 	}
-
-	e.DependencyNamespace = ns
 	return nil
 }
 
-// Close implementation.
-func (e *Implementation) Close() error {
-
-	var err1 error
-	var err2 error
-	if e.TestNamespace != "" {
-		err1 = e.Accessor.DeleteNamespace(e.TestNamespace)
-		e.TestNamespace = ""
+func (n *namespace) getNameToAllocate() string {
+	if n.name != "" {
+		return n.name
 	}
-
-	if e.DependencyNamespace != "" {
-		err2 = e.Accessor.DeleteNamespace(e.DependencyNamespace)
-		e.DependencyNamespace = ""
-	}
-
-	if err1 != nil || err2 != nil {
-		return multierror.Append(err1, err2)
-	}
-
-	return nil
+	return fmt.Sprintf("%s-%s", n.annotation, uuid.New().String())
 }

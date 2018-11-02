@@ -55,9 +55,9 @@ while getopts d:i:o:v: arg ; do
   esac
 done
 
-[[ -z "${BASE_DIR}"  ]] && usage
-[[ -z "${OUTPUT_PATH}"  ]] && usage
-[[ -z "${VER_STRING}"   ]] && usage
+[[ -z "${BASE_DIR}"    ]] && usage
+[[ -z "${OUTPUT_PATH}" ]] && usage
+[[ -z "${VER_STRING}"  ]] && usage
 
 COMMON_FILES_DIR="${BASE_DIR}/istio/istio-${VER_STRING}"
 BIN_DIR="${COMMON_FILES_DIR}/bin"
@@ -66,12 +66,8 @@ mkdir -p "${BIN_DIR}"
 # On mac, brew install gnu-tar gnu-cp
 # and set CP="gcp" TAR="gtar"
 
-if [[ -z "${CP}" ]] ; then
-  CP="cp"
-fi
-if [[ -z "${TAR}" ]] ; then
-  TAR="tar"
-fi
+CP=${CP:-"cp"}
+TAR=${TAR:-"tar"}
 
 function create_linux_archive() {
   local istioctl_path="${BIN_DIR}/istioctl"
@@ -79,7 +75,7 @@ function create_linux_archive() {
   ${CP} "${OUTPUT_PATH}/${ISTIOCTL_SUBDIR}/istioctl-linux" "${istioctl_path}"
   chmod 755 "${istioctl_path}"
 
-  ${TAR} --owner releng --group releng -czvf \
+  ${TAR} --owner releng --group releng -czf \
     "${OUTPUT_PATH}/istio-${VER_STRING}-linux.tar.gz" "istio-${VER_STRING}" \
     || error_exit 'Could not create linux archive'
   rm "${istioctl_path}"
@@ -91,7 +87,7 @@ function create_osx_archive() {
   ${CP} "${OUTPUT_PATH}/${ISTIOCTL_SUBDIR}/istioctl-osx" "${istioctl_path}"
   chmod 755 "${istioctl_path}"
 
-  ${TAR} --owner releng --group releng -czvf \
+  ${TAR} --owner releng --group releng -czf \
     "${OUTPUT_PATH}/istio-${VER_STRING}-osx.tar.gz" "istio-${VER_STRING}" \
     || error_exit 'Could not create osx archive'
   rm "${istioctl_path}"
@@ -102,7 +98,7 @@ function create_windows_archive() {
 
   ${CP} "${OUTPUT_PATH}/${ISTIOCTL_SUBDIR}/istioctl-win.exe" "${istioctl_path}"
 
-  zip -r "${OUTPUT_PATH}/istio-${VER_STRING}-win.zip" "istio-${VER_STRING}" \
+  zip -r -q "${OUTPUT_PATH}/istio-${VER_STRING}-win.zip" "istio-${VER_STRING}" \
     || error_exit 'Could not create windows archive'
   rm "${istioctl_path}"
 }
@@ -112,6 +108,7 @@ ${CP} istio.VERSION LICENSE README.md "${COMMON_FILES_DIR}"/
 find samples install -type f \( \
   -name "*.yaml" \
   -o -name "*.yml" \
+  -o -name "*.json" \
   -o -name "*.cfg" \
   -o -name "*.j2" \
   -o -name "cleanup*" \
@@ -124,9 +121,9 @@ find samples install -type f \( \
   -o -name "webhook-create-signed-cert.sh" \
   -o -name "webhook-patch-ca-bundle.sh" \
   \) \
-  -exec ${CP} --parents {} "${COMMON_FILES_DIR}" \;
-find install/tools -type f -exec ${CP} --parents {} "${COMMON_FILES_DIR}" \;
-find tools -type f -not -name "githubContrib*" -not -name ".*" -exec ${CP} --parents {} "${COMMON_FILES_DIR}" \;
+  -exec "${CP}" --parents {} "${COMMON_FILES_DIR}" \;
+find install/tools -type f -exec "${CP}" --parents {} "${COMMON_FILES_DIR}" \;
+find tools -type f -not -name "githubContrib*" -not -name ".*" -exec "${CP}" --parents {} "${COMMON_FILES_DIR}" \;
 popd
 
 for unwanted_manifest in \

@@ -16,9 +16,13 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"strings"
 	"sync"
+	"time"
 
 	"github.com/gogo/protobuf/proto"
 	"google.golang.org/grpc"
@@ -31,27 +35,45 @@ import (
 	"istio.io/istio/pkg/log"
 	"istio.io/istio/pkg/mcp/client"
 	"istio.io/istio/pkg/mcp/configz"
+	"istio.io/istio/pkg/mcp/creds"
+	"istio.io/istio/pkg/mcp/snapshot"
 	"istio.io/istio/pkg/probe"
 )
 
 var scope = log.RegisterScope("mcp", "Mixer MCP client stack", 0)
 
 const (
-	mixerNodeID      = ""
-	eventChannelSize = 4096
+	mixerNodeID           = snapshot.DefaultGroup
+	eventChannelSize      = 4096
+	requiredCertCheckFreq = 500 * time.Millisecond
 )
 
 // Register registers this module as a StoreBackend.
 // Do not use 'init()' for automatic registration; linker will drop
 // the whole module because it looks unused.
 func Register(builders map[string]store.Builder) {
-	builders["mcp"] = func(u *url.URL, gv *schema.GroupVersion) (store.Backend, error) { return newStore(u, nil) }
+	builder := func(u *url.URL, gv *schema.GroupVersion, credOptions *creds.Options, _ []string) (store.Backend, error) {
+		return newStore(u, credOptions, nil)
+	}
+
+	builders["mcp"] = builder
+	builders["mcps"] = builder
 }
 
 // NewStore creates a new Store instance.
-func newStore(u *url.URL, fn updateHookFn) (store.Backend, error) {
+func newStore(u *url.URL, credOptions *creds.Options, fn updateHookFn) (store.Backend, error) {
+	insecure := true
+	if u.Scheme == "mcps" {
+		insecure = false
+		if credOptions == nil {
+			return nil, errors.New("no credentials specified with secure MCP scheme")
+		}
+	}
+
 	return &backend{
 		serverAddress: u.Host,
+		insecure:      insecure,
+		credOptions:   credOptions,
 		Probe:         probe.NewProbe(),
 		updateHook:    fn,
 	}, nil
@@ -65,8 +87,14 @@ type backend struct {
 	// mapping of CRD <> typeURLs.
 	mapping *mapping
 
+	// Use insecure communication for gRPC.
+	insecure bool
+
 	// address of the MCP server.
 	serverAddress string
+
+	// MCP credential options
+	credOptions *creds.Options
 
 	// The cancellation function that is used to cancel gRPC/MCP operations.
 	cancel context.CancelFunc
@@ -93,10 +121,11 @@ var _ client.Updater = &backend{}
 
 // state is the in-memory cache.
 type state struct {
-	sync.Mutex
+	sync.RWMutex
 
 	// items stored by kind, then by key.
-	items map[string]map[store.Key]*store.BackEndResource
+	items  map[string]map[store.Key]*store.BackEndResource
+	synced map[string]bool // by kind
 }
 
 // Init implements store.Backend.Init.
@@ -107,30 +136,96 @@ func (b *backend) Init(kinds []string) error {
 	}
 	b.mapping = m
 
-	messageNames := b.mapping.messageNames()
-	scope.Infof("Requesting following messages:")
-	for i, name := range messageNames {
-		scope.Infof("  [%d] %s", i, name)
+	typeURLs := b.mapping.typeURLs()
+	scope.Infof("Requesting following types:")
+	for i, url := range typeURLs {
+		scope.Infof("  [%d] %s", i, url)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	conn, err := grpc.DialContext(ctx, b.serverAddress, grpc.WithInsecure())
+
+	securityOption := grpc.WithInsecure()
+	if !b.insecure {
+		address := b.serverAddress
+		if strings.Contains(address, ":") {
+			address = strings.Split(address, ":")[0]
+		}
+
+		requiredFiles := []string{b.credOptions.CertificateFile, b.credOptions.KeyFile, b.credOptions.CACertificateFile}
+		log.Infof("Secure MCP configured. Waiting for required certificate files to become available: %v", requiredFiles)
+		for len(requiredFiles) > 0 {
+			if _, err := os.Stat(requiredFiles[0]); os.IsNotExist(err) {
+				log.Infof("%v not found. Checking again in %v", requiredFiles[0], requiredCertCheckFreq)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(requiredCertCheckFreq):
+					// retry
+				}
+				continue
+			}
+
+			log.Infof("%v found", requiredFiles[0])
+			requiredFiles = requiredFiles[1:]
+		}
+
+		watcher, err := creds.WatchFiles(ctx.Done(), b.credOptions)
+		if err != nil {
+			return err
+		}
+		credentials := creds.CreateForClient(address, watcher)
+		securityOption = grpc.WithTransportCredentials(credentials)
+	}
+
+	conn, err := grpc.DialContext(ctx, b.serverAddress, securityOption)
 	if err != nil {
 		cancel()
 		scope.Errorf("Error connecting to server: %v\n", err)
 		return err
 	}
+
 	cl := mcp.NewAggregatedMeshConfigServiceClient(conn)
-	c := client.New(cl, messageNames, b, mixerNodeID, map[string]string{})
+	c := client.New(cl, typeURLs, b, mixerNodeID, map[string]string{}, client.NewStatsContext("mixer"))
 	configz.Register(c)
 
 	b.state = &state{
-		items: make(map[string]map[store.Key]*store.BackEndResource),
+		items:  make(map[string]map[store.Key]*store.BackEndResource),
+		synced: make(map[string]bool),
+	}
+	for _, typeURL := range typeURLs {
+		b.state.synced[typeURL] = false
 	}
 
 	go c.Run(ctx)
 	b.cancel = cancel
 
+	return nil
+}
+
+// WaitForSynced implements store.Backend interface.
+func (b *backend) WaitForSynced(timeout time.Duration) error {
+	stop := time.After(timeout)
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+
+	for {
+		select {
+		case <-stop:
+			return fmt.Errorf("exceeded timeout %v", timeout)
+		case <-tick.C:
+			ready := true
+
+			for _, synced := range b.state.synced {
+				if !synced {
+					ready = false
+					break
+				}
+			}
+			if ready {
+				return nil
+			}
+		}
+	}
 	return nil
 }
 
@@ -158,8 +253,8 @@ func (b *backend) Watch() (<-chan store.BackendEvent, error) {
 
 // Get returns a resource's spec to the key.
 func (b *backend) Get(key store.Key) (*store.BackEndResource, error) {
-	b.state.Lock()
-	defer b.state.Unlock()
+	b.state.RLock()
+	defer b.state.RUnlock()
 
 	perTypeState, found := b.state.items[key.Kind]
 	if !found {
@@ -176,8 +271,8 @@ func (b *backend) Get(key store.Key) (*store.BackEndResource, error) {
 
 // List returns the whole mapping from key to resource specs in the store.
 func (b *backend) List() map[store.Key]*store.BackEndResource {
-	b.state.Lock()
-	defer b.state.Unlock()
+	b.state.RLock()
+	defer b.state.RUnlock()
 
 	result := make(map[store.Key]*store.BackEndResource)
 	for _, perTypeItems := range b.state.items {
@@ -196,9 +291,11 @@ func (b *backend) Apply(change *client.Change) error {
 	defer b.callUpdateHook()
 
 	newTypeStates := make(map[string]map[store.Key]*store.BackEndResource)
-	typeURL := fmt.Sprintf("type.googleapis.com/%s", change.MessageName)
+	typeURL := change.TypeURL
 
-	scope.Debugf("Received update for: type:%s, count:%d", change.MessageName, len(change.Objects))
+	b.state.synced[typeURL] = true
+
+	scope.Debugf("Received update for: type:%s, count:%d", typeURL, len(change.Objects))
 
 	for _, o := range change.Objects {
 		var kind string
@@ -206,7 +303,8 @@ func (b *backend) Apply(change *client.Change) error {
 		var contents proto.Message
 
 		if scope.DebugEnabled() {
-			scope.Debugf("Processing incoming resource: %q @%s [%s]", o.Metadata.Name, o.Version, o.MessageName)
+			scope.Debugf("Processing incoming resource: %q @%s [%s]",
+				o.Metadata.Name, o.Metadata.Version, o.TypeURL)
 		}
 
 		// Demultiplex the resource, if it is a legacy type, and figure out its kind.
@@ -232,7 +330,7 @@ func (b *backend) Apply(change *client.Change) error {
 		// Map it to Mixer's store model, and put it in the new collection.
 
 		key := toKey(kind, name)
-		resource, err := toBackendResource(key, contents, o.Version)
+		resource, err := toBackendResource(key, contents, o.Metadata.Version)
 		if err != nil {
 			return err
 		}

@@ -18,10 +18,7 @@ import (
 	"fmt"
 	"sort"
 	"testing"
-
 	"time"
-
-	meta_v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	networking "istio.io/api/networking/v1alpha3"
 	"istio.io/istio/pilot/pkg/config/memory"
@@ -37,7 +34,7 @@ func createServiceEntries(serviceEntries []*networking.ServiceEntry, store model
 				Name:              svc.Hosts[0],
 				Namespace:         "default",
 				Domain:            "cluster.local",
-				CreationTimestamp: meta_v1.Time{creationTime},
+				CreationTimestamp: creationTime,
 			},
 			Spec: svc,
 		}
@@ -126,9 +123,20 @@ func TestServiceDiscoveryGetProxyServiceInstances(t *testing.T) {
 	tnow := time.Now()
 	createServiceEntries([]*networking.ServiceEntry{httpStatic, tcpStatic}, store, t, tnow)
 
-	_, err := sd.GetProxyServiceInstances(&model.Proxy{IPAddress: "2.2.2.2"})
+	expectedInstances := []*model.ServiceInstance{
+		makeInstance(httpStatic, "2.2.2.2", 7080, httpStatic.Ports[0], nil, tnow),
+		makeInstance(httpStatic, "2.2.2.2", 18080, httpStatic.Ports[1], nil, tnow),
+		makeInstance(tcpStatic, "2.2.2.2", 444, tcpStatic.Ports[0], nil, tnow),
+	}
+
+	instances, err := sd.GetProxyServiceInstances(&model.Proxy{IPAddress: "2.2.2.2"})
 	if err != nil {
 		t.Errorf("GetProxyServiceInstances() encountered unexpected error: %v", err)
+	}
+	sortServiceInstances(instances)
+	sortServiceInstances(expectedInstances)
+	if err := compare(t, instances, expectedInstances); err != nil {
+		t.Error(err)
 	}
 }
 
@@ -197,7 +205,7 @@ func TestNonServiceConfig(t *testing.T) {
 			Name:              "fakeDestinationRule",
 			Namespace:         "default",
 			Domain:            "cluster.local",
-			CreationTimestamp: meta_v1.Time{tnow},
+			CreationTimestamp: tnow,
 		},
 		Spec: &networking.DestinationRule{
 			Host: "fakehost",

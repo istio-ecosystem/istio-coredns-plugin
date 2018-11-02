@@ -1,16 +1,16 @@
-//  Copyright 2018 Istio Authors
+// Copyright 2018 Istio Authors
 //
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package server
 
@@ -19,8 +19,9 @@ import (
 	"os"
 	"path"
 	"testing"
-	"time"
 
+	"github.com/fsnotify/fsnotify"
+	"istio.io/istio/pkg/filewatcher"
 	"istio.io/istio/pkg/mcp/server"
 )
 
@@ -71,6 +72,15 @@ func TestWatchAccessList_Initial_NotExists(t *testing.T) {
 }
 
 func TestWatchAccessList_Update(t *testing.T) {
+	added := make(chan string, 10)
+	var fake *filewatcher.FakeWatcher
+	newFileWatcher, fake = filewatcher.NewFakeWatcher(func(path string, _ bool) { added <- path })
+	defer func() {
+		newFileWatcher = filewatcher.NewWatcher
+		readFile = ioutil.ReadFile
+		watchEventHandledProbe = nil
+	}()
+
 	initial := `
 allowed:
     - spiffe://cluster.local/ns/istio-system/sa/istio-mixer-service-account
@@ -83,22 +93,36 @@ allowed:
 		t.Fatalf("Unexpected error: %v", err)
 	}
 
+	gotAddedFile := <-added
+	if gotAddedFile != file {
+		t.Fatalf("access list watcher read the wrong file: got %v want %v", gotAddedFile, file)
+	}
+
 	updated := `
 allowed:
     - spiffe://cluster.local/ns/istio-system/sa/istio-pilot-service-account
 `
 
-	writeFile(t, file, updated)
-
-	for i := 0; i < 100; i++ {
-		if checker.Allowed("spiffe://cluster.local/ns/istio-system/sa/istio-pilot-service-account") {
-			return
+	// inject the updated file read into the watcher
+	readFile = func(filename string) ([]byte, error) {
+		if filename != file {
+			t.Fatalf("read wrong filename: got %v want %v", filename, file)
 		}
-
-		time.Sleep(time.Millisecond * 10)
+		return []byte(updated), nil
 	}
 
-	t.Fatal("Expected spiffe id to be allowed.")
+	// fake the watch `Write` event and wait for the event to be handled and the accesslist updated.
+	watchEventHandled := make(chan struct{})
+	watchEventHandledProbe = func() { close(watchEventHandled) }
+	fake.InjectEvent(file, fsnotify.Event{
+		Name: file,
+		Op:   fsnotify.Write,
+	})
+	<-watchEventHandled
+
+	if !checker.Allowed("spiffe://cluster.local/ns/istio-system/sa/istio-pilot-service-account") {
+		t.Fatal("Expected spiffe id to be allowed.")
+	}
 }
 
 func setupWatchAccessList(t *testing.T, initialdata string) (string, chan struct{}, *server.ListAuthChecker, error) {

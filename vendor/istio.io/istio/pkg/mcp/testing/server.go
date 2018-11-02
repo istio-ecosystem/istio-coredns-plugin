@@ -20,12 +20,12 @@ import (
 	"net"
 	"net/url"
 
-	mcp "istio.io/api/mcp/v1alpha1"
-
 	"google.golang.org/grpc"
 
+	mcp "istio.io/api/mcp/v1alpha1"
 	"istio.io/istio/pkg/mcp/server"
 	"istio.io/istio/pkg/mcp/snapshot"
+	"istio.io/istio/pkg/mcp/testing/monitoring"
 )
 
 // Server is a simple MCP server, used for testing purposes.
@@ -52,8 +52,8 @@ var _ io.Closer = &Server{}
 // Specifying port as 0 will cause the server to bind to an arbitrary port. This port can be queried
 // from the Port field of the returned server struct.
 func NewServer(port int, typeUrls []string) (*Server, error) {
-	cache := snapshot.New()
-	s := server.New(cache, typeUrls, nil)
+	cache := snapshot.New(snapshot.DefaultGroupIndex)
+	s := server.New(cache, typeUrls, server.NewAllowAllChecker(), mcptestmon.NewInMemoryServerStatsContext())
 
 	addr := fmt.Sprintf("127.0.0.1:%d", port)
 	l, err := net.Listen("tcp", addr)
@@ -63,7 +63,7 @@ func NewServer(port int, typeUrls []string) (*Server, error) {
 
 	p := l.Addr().(*net.TCPAddr).Port
 
-	u, err := url.Parse(fmt.Sprintf("mcpi://localhost:%d", p))
+	u, err := url.Parse(fmt.Sprintf("mcp://localhost:%d", p))
 	if err != nil {
 		_ = l.Close()
 		return nil, err

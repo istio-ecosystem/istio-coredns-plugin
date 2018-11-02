@@ -28,10 +28,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/google/go-cmp/cmp"
-	"github.com/google/go-cmp/cmp/cmpopts"
-	gax "github.com/googleapis/gax-go"
-
 	"cloud.google.com/go/civil"
 	"cloud.google.com/go/httpreplay"
 	"cloud.google.com/go/internal"
@@ -39,6 +35,9 @@ import (
 	"cloud.google.com/go/internal/testutil"
 	"cloud.google.com/go/internal/uid"
 	"cloud.google.com/go/storage"
+	"github.com/google/go-cmp/cmp"
+	"github.com/google/go-cmp/cmp/cmpopts"
+	gax "github.com/googleapis/gax-go"
 	"golang.org/x/net/context"
 	"google.golang.org/api/googleapi"
 	"google.golang.org/api/iterator"
@@ -286,14 +285,17 @@ func TestIntegration_TableMetadata(t *testing.T) {
 		timePartitioning TimePartitioning
 		wantExpiration   time.Duration
 		wantField        string
+		wantPruneFilter  bool
 	}{
-		{TimePartitioning{}, time.Duration(0), ""},
-		{TimePartitioning{Expiration: time.Second}, time.Second, ""},
+		{TimePartitioning{}, time.Duration(0), "", false},
+		{TimePartitioning{Expiration: time.Second}, time.Second, "", false},
+		{TimePartitioning{RequirePartitionFilter: true}, time.Duration(0), "", true},
 		{
 			TimePartitioning{
-				Expiration: time.Second,
-				Field:      "date",
-			}, time.Second, "date"},
+				Expiration:             time.Second,
+				Field:                  "date",
+				RequirePartitionFilter: true,
+			}, time.Second, "date", true},
 	}
 
 	schema2 := Schema{
@@ -332,6 +334,9 @@ func TestIntegration_TableMetadata(t *testing.T) {
 			ExpirationTime:   testTableExpiration,
 			Clustering:       clustering,
 		})
+		if err != nil {
+			t.Fatal(err)
+		}
 		clusterMD, err := clusterTable.Metadata(ctx)
 		if err != nil {
 			t.Fatal(err)
@@ -340,12 +345,29 @@ func TestIntegration_TableMetadata(t *testing.T) {
 		for _, v := range []*TableMetadata{md, clusterMD} {
 			got := v.TimePartitioning
 			want := &TimePartitioning{
-				Expiration: c.wantExpiration,
-				Field:      c.wantField,
+				Expiration:             c.wantExpiration,
+				Field:                  c.wantField,
+				RequirePartitionFilter: c.wantPruneFilter,
 			}
 			if !testutil.Equal(got, want) {
 				t.Errorf("metadata.TimePartitioning: got %v, want %v", got, want)
 			}
+			// check that RequirePartitionFilter can be inverted.
+			mdUpdate := TableMetadataToUpdate{
+				TimePartitioning: &TimePartitioning{
+					Expiration:             v.TimePartitioning.Expiration,
+					RequirePartitionFilter: !want.RequirePartitionFilter,
+				},
+			}
+
+			newmd, err := table.Update(ctx, mdUpdate, "")
+			if err != nil {
+				t.Errorf("failed to invert RequirePartitionFilter on %s: %v", table.FullyQualifiedName(), err)
+			}
+			if newmd.TimePartitioning.RequirePartitionFilter == want.RequirePartitionFilter {
+				t.Errorf("inverting RequirePartitionFilter on %s failed, want %t got %t", table.FullyQualifiedName(), !want.RequirePartitionFilter, newmd.TimePartitioning.RequirePartitionFilter)
+			}
+
 		}
 
 		if md.Clustering != nil {
@@ -501,12 +523,12 @@ func TestIntegration_DatasetUpdateDefaultExpiration(t *testing.T) {
 		t.Skip("Integration tests skipped")
 	}
 	ctx := context.Background()
-	md, err := dataset.Metadata(ctx)
+	_, err := dataset.Metadata(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	// Set the default expiration time.
-	md, err = dataset.Update(ctx, DatasetMetadataToUpdate{DefaultTableExpiration: time.Hour}, "")
+	md, err := dataset.Update(ctx, DatasetMetadataToUpdate{DefaultTableExpiration: time.Hour}, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -568,13 +590,13 @@ func TestIntegration_DatasetUpdateLabels(t *testing.T) {
 		t.Skip("Integration tests skipped")
 	}
 	ctx := context.Background()
-	md, err := dataset.Metadata(ctx)
+	_, err := dataset.Metadata(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	var dm DatasetMetadataToUpdate
 	dm.SetLabel("label", "value")
-	md, err = dataset.Update(ctx, dm, "")
+	md, err := dataset.Update(ctx, dm, "")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -1672,7 +1694,7 @@ const (
 
 // These tests exploit the fact that the two SQL versions have different syntaxes for
 // fully-qualified table names.
-var useLegacySqlTests = []struct {
+var useLegacySQLTests = []struct {
 	t           string // name of table
 	std, legacy bool   // use standard/legacy SQL
 	err         bool   // do we expect an error?
@@ -1693,7 +1715,7 @@ func TestIntegration_QueryUseLegacySQL(t *testing.T) {
 		t.Skip("Integration tests skipped")
 	}
 	ctx := context.Background()
-	for _, test := range useLegacySqlTests {
+	for _, test := range useLegacySQLTests {
 		q := client.Query(fmt.Sprintf("select word from %s limit 1", test.t))
 		q.UseStandardSQL = test.std
 		q.UseLegacySQL = test.legacy
@@ -1715,7 +1737,7 @@ func TestIntegration_TableUseLegacySQL(t *testing.T) {
 	ctx := context.Background()
 	table := newTable(t, schema)
 	defer table.Delete(ctx)
-	for i, test := range useLegacySqlTests {
+	for i, test := range useLegacySQLTests {
 		view := dataset.Table(fmt.Sprintf("t_view_%d", i))
 		tm := &TableMetadata{
 			ViewQuery:      fmt.Sprintf("SELECT word from %s", test.t),

@@ -24,10 +24,9 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
-
-	gax "github.com/googleapis/gax-go"
 
 	cinternal "cloud.google.com/go/internal"
 	"cloud.google.com/go/internal/testutil"
@@ -35,6 +34,7 @@ import (
 	"cloud.google.com/go/logging"
 	ltesting "cloud.google.com/go/logging/internal/testing"
 	"cloud.google.com/go/logging/logadmin"
+	gax "github.com/googleapis/gax-go"
 	"golang.org/x/net/context"
 	"golang.org/x/oauth2"
 	"google.golang.org/api/iterator"
@@ -202,7 +202,9 @@ func TestLogAndEntries(t *testing.T) {
 		// Use the insert ID to guarantee iteration order.
 		lg.Log(logging.Entry{Payload: p, InsertID: p})
 	}
-	lg.Flush()
+	if err := lg.Flush(); err != nil {
+		t.Fatal(err)
+	}
 	var want []*logging.Entry
 	for _, p := range payloads {
 		want = append(want, entryForTesting(p))
@@ -222,6 +224,25 @@ func TestLogAndEntries(t *testing.T) {
 	}
 	if msg, ok := compareEntries(got, want); !ok {
 		t.Error(msg)
+	}
+}
+
+func TestContextFunc(t *testing.T) {
+	initLogs(ctx)
+	var contextFuncCalls, cleanupCalls int32 //atomic
+
+	lg := client.Logger(testLogID, logging.ContextFunc(func() (context.Context, func()) {
+		atomic.AddInt32(&contextFuncCalls, 1)
+		return context.Background(), func() { atomic.AddInt32(&cleanupCalls, 1) }
+	}))
+	lg.Log(logging.Entry{Payload: "p"})
+	if err := lg.Flush(); err != nil {
+		t.Fatal(err)
+	}
+	got1 := atomic.LoadInt32(&contextFuncCalls)
+	got2 := atomic.LoadInt32(&cleanupCalls)
+	if got1 != 1 || got1 != got2 {
+		t.Errorf("got %d calls to context func, %d calls to cleanup func; want 1, 1", got1, got2)
 	}
 }
 
@@ -278,21 +299,6 @@ func entryForTesting(payload interface{}) *logging.Entry {
 	}
 }
 
-func countLogEntries(ctx context.Context, filter string) int {
-	it := aclient.Entries(ctx, logadmin.Filter(filter))
-	n := 0
-	for {
-		_, err := it.Next()
-		if err == iterator.Done {
-			return n
-		}
-		if err != nil {
-			log.Fatalf("counting log entries: %v", err)
-		}
-		n++
-	}
-}
-
 func allTestLogEntries(ctx context.Context) ([]*logging.Entry, error) {
 	return allEntries(ctx, aclient, testFilter)
 }
@@ -336,7 +342,9 @@ func TestStandardLogger(t *testing.T) {
 	}
 
 	slg.Print("info")
-	lg.Flush()
+	if err := lg.Flush(); err != nil {
+		t.Fatal(err)
+	}
 	var got []*logging.Entry
 	ok := waitFor(func() bool {
 		var err error
@@ -539,10 +547,10 @@ func TestNonProjectParent(t *testing.T) {
 // It returns false after a while (if it times out).
 func waitFor(f func() bool) bool {
 	// TODO(shadams): Find a better way to deflake these tests.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 	defer cancel()
 	err := cinternal.Retry(ctx,
-		gax.Backoff{Initial: time.Second, Multiplier: 2},
+		gax.Backoff{Initial: time.Second, Multiplier: 2, Max: 30 * time.Second},
 		func() (bool, error) { return f(), nil })
 	return err == nil
 }
@@ -575,7 +583,9 @@ func TestLogFlushRace(t *testing.T) {
 				case <-donec:
 					return
 				case <-time.After(time.Duration(rand.Intn(5)) * time.Millisecond):
-					lg.Flush()
+					if err := lg.Flush(); err != nil {
+						t.Error(err)
+					}
 				}
 			}
 		}()
@@ -627,6 +637,8 @@ func benchmarkConcurrentWrites(b *testing.B, c int) {
 		for j := 0; j < nEntries; j++ {
 			lg.Log(logging.Entry{Payload: payload})
 		}
-		lg.Flush()
+		if err := lg.Flush(); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

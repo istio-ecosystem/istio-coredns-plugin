@@ -1,16 +1,16 @@
-//  Copyright 2018 Istio Authors
+// Copyright 2018 Istio Authors
 //
-//  Licensed under the Apache License, Version 2.0 (the "License");
-//  you may not use this file except in compliance with the License.
-//  You may obtain a copy of the License at
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
 //
-//      http://www.apache.org/licenses/LICENSE-2.0
+//     http://www.apache.org/licenses/LICENSE-2.0
 //
-//  Unless required by applicable law or agreed to in writing, software
-//  distributed under the License is distributed on an "AS IS" BASIS,
-//  WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-//  See the License for the specific language governing permissions and
-//  limitations under the License.
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
 
 package main
 
@@ -34,7 +34,7 @@ import (
 
 var (
 	serverAddr = flag.String("server", "127.0.0.1:9901", "The server address")
-	types      = flag.String("types", "", "The types of resources to deploy")
+	types      = flag.String("types", "", "The fully qualified type URLs of resources to deploy")
 	id         = flag.String("id", "", "The node id for the client")
 )
 
@@ -43,10 +43,10 @@ type updater struct {
 
 // Update interface method implementation.
 func (u *updater) Apply(ch *client.Change) error {
-	fmt.Printf("Incoming change: %v\n", ch.MessageName)
+	fmt.Printf("Incoming change: %v\n", ch.TypeURL)
 
 	for i, o := range ch.Objects {
-		fmt.Printf("%s[%d]\n", ch.MessageName, i)
+		fmt.Printf("%s[%d]\n", ch.TypeURL, i)
 
 		b, err := json.MarshalIndent(o, "  ", "  ")
 		if err != nil {
@@ -75,6 +75,6 @@ func main() {
 
 	cl := mcp.NewAggregatedMeshConfigServiceClient(conn)
 
-	c := client.New(cl, typeNames, u, *id, map[string]string{})
+	c := client.New(cl, typeNames, u, *id, map[string]string{}, client.NewStatsContext("mcpc"))
 	c.Run(context.Background())
 }

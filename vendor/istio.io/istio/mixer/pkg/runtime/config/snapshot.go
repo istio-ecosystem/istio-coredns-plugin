@@ -15,6 +15,10 @@
 package config
 
 import (
+	"context"
+
+	"go.opencensus.io/tag"
+
 	"github.com/gogo/protobuf/proto"
 	"github.com/gogo/protobuf/protoc-gen-gogo/descriptor"
 	"github.com/gogo/protobuf/types"
@@ -24,7 +28,9 @@ import (
 	"istio.io/istio/mixer/pkg/adapter"
 	"istio.io/istio/mixer/pkg/lang/ast"
 	"istio.io/istio/mixer/pkg/protobuf/yaml/dynamic"
+	"istio.io/istio/mixer/pkg/runtime/monitoring"
 	"istio.io/istio/mixer/pkg/template"
+	"istio.io/istio/pkg/log"
 )
 
 type (
@@ -52,8 +58,8 @@ type (
 		InstancesDynamic map[string]*InstanceDynamic
 		Rules            []*Rule
 
-		// Perf Counters relevant to configuration.
-		Counters Counters
+		// Used to update Perf measures relevant to configuration.
+		MonitoringContext context.Context
 	}
 
 	// HandlerDynamic configuration for dynamically loaded, grpc adapters. Fully resolved.
@@ -93,6 +99,9 @@ type (
 
 		// Params of the instance; used to to create the config SHA.
 		Params map[string]interface{}
+
+		// AttributeBindings used to map the adapter output back into attributes
+		AttributeBindings map[string]string
 	}
 
 	// InstanceStatic configuration for compiled templates. Fully resolved.
@@ -164,6 +173,10 @@ type (
 
 		// package name of the `Template` message
 		PackageName string
+
+		// AttributeManifest declares the output attributes for the template.
+		// For attribute producing adapters, the output attributes are of the form $out.field_name.
+		AttributeManifest map[string]*v1beta1.AttributeManifest_AttributeInfo
 	}
 
 	// Adapter contains info about an adapter
@@ -186,10 +199,17 @@ type (
 
 // Empty returns a new, empty configuration snapshot.
 func Empty() *Snapshot {
+
+	var err error
+	ctx := context.Background()
+	if ctx, err = tag.New(ctx, tag.Insert(monitoring.ConfigIDTag, "-1")); err != nil {
+		log.Errorf("error establishing monitoring context config ID: %v", err)
+	}
+
 	return &Snapshot{
-		ID:       -1,
-		Rules:    []*Rule{},
-		Counters: newCounters(-1),
+		ID:                -1,
+		Rules:             []*Rule{},
+		MonitoringContext: ctx,
 	}
 }
 

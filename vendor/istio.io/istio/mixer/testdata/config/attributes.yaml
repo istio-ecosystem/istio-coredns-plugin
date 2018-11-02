@@ -58,7 +58,7 @@ spec:
       destination.uid:
         valueType: STRING
       connection.event:
-            valueType: STRING
+        valueType: STRING
       connection.id:
         valueType: STRING
       connection.received.bytes:
@@ -73,6 +73,8 @@ spec:
         valueType: DURATION
       connection.mtls:
         valueType: BOOL
+      connection.requested_server_name:
+        valueType: STRING
       context.protocol:
         valueType: STRING
       context.timestamp:

@@ -1,6 +1,6 @@
 #!/bin/bash
-#
-# Copyright 2017,2018 Istio Authors. All Rights Reserved.
+
+# Copyright 2018 Istio Authors
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -13,19 +13,15 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-#
 
 # Init script downloads or updates envoy and the go dependencies. Called from Makefile, which sets
 # the needed environment variables.
 
-ROOT=$(cd "$(dirname "$0")"/..; pwd)
+ROOTDIR=$(cd "$(dirname "$0")"/..; pwd)
 
 set -o errexit
 set -o nounset
 set -o pipefail
-
-# TODO(nmittler): Remove before merging.
-set -x # echo on
 
 # TODO(nmittler): Remove these variables and require that this script be run from the Makefile
 
@@ -64,7 +60,7 @@ export ISTIO_OUT=${ISTIO_OUT:-${ISTIO_BIN}}
 
 # Gets the download command supported by the system (currently either curl or wget)
 DOWNLOAD_COMMAND=""
-set_download_command () {
+function set_download_command () {
     # Try curl.
     if command -v curl > /dev/null; then
         if curl --version | grep Protocols  | grep https > /dev/null; then
@@ -98,7 +94,7 @@ ISTIO_ENVOY_VERSION=${ISTIO_ENVOY_VERSION:-${PROXY_REPO_SHA}}
 ISTIO_ENVOY_DEBUG_URL=${ISTIO_ENVOY_DEBUG_URL:-https://storage.googleapis.com/istio-build/proxy/envoy-debug-${ISTIO_ENVOY_VERSION}.tar.gz}
 ISTIO_ENVOY_RELEASE_URL=${ISTIO_ENVOY_RELEASE_URL:-https://storage.googleapis.com/istio-build/proxy/envoy-alpha-${ISTIO_ENVOY_VERSION}.tar.gz}
 # TODO Change url when official envoy release for MAC is available
-ISTIO_ENVOY_MAC_RELEASE_URL=${ISTIO_ENVOY_MAC_RELEASE_URL:-https://storage.googleapis.com/istio-on-macos/releases/0.7.1/istio-proxy-0.7.1-macos.tar.gz}
+ISTIO_ENVOY_MAC_RELEASE_URL=${ISTIO_ENVOY_MAC_RELEASE_URL:-https://github.com/istio/proxy/releases/download/1.0.2/istio-proxy-1.0.2-macos.tar.gz}
 
 # Normally set by the Makefile.
 # Variables for the extracted debug/release Envoy artifacts.
@@ -115,7 +111,7 @@ set_download_command
 # Save envoy in $ISTIO_ENVOY_DIR
 if [ ! -f "$ISTIO_ENVOY_DEBUG_PATH" ] || [ ! -f "$ISTIO_ENVOY_RELEASE_PATH" ] ; then
     # Clear out any old versions of Envoy.
-    rm -f "${ISTIO_OUT}/envoy" "${ROOT}/pilot/pkg/proxy/envoy/envoy" "${ISTIO_BIN}/envoy"
+    rm -f "${ISTIO_OUT}/envoy" "${ROOTDIR}/pilot/pkg/proxy/envoy/envoy" "${ISTIO_BIN}/envoy"
 
     # Download debug envoy binary.
     mkdir -p "$ISTIO_ENVOY_DEBUG_DIR"
@@ -164,4 +160,4 @@ else
     cp "${ISTIO_ENVOY_DEBUG_PATH}" "${ISTIO_BIN}/envoy"
 fi
 
-"${ROOT}/bin/init_helm.sh"
+"${ROOTDIR}/bin/init_helm.sh"
