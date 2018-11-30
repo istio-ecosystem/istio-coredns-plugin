@@ -72,7 +72,7 @@ func (h *IstioServiceEntries) readServiceEntries(vip string) {
 	dnsEntries := make(map[string][]net.IP)
 	serviceEntries := h.configStore.ServiceEntries()
 	log.Printf("Have %d service entries\n", len(serviceEntries))
-	for _, e := range serviceEntries {
+	for i, e := range serviceEntries {
 		entry := e.Spec.(*networking.ServiceEntry)
 		if errs := model.ValidateServiceEntry(e.Name, e.Namespace, entry); errs != nil {
 			log.Printf("Ignoring invalid service entry: %s.%s - %v\n", e.Name, e.Namespace, errs)
@@ -88,9 +88,14 @@ func (h *IstioServiceEntries) readServiceEntries(vip string) {
 		}
 
 		addresses := entry.Addresses
-		if len(addresses) == 0 && vip != "" {
-			// If the ServiceEntry has no Addresses, map to a user-supplied default value, if provided
-			addresses = []string{vip}
+		if len(addresses) == 0 {
+			if vip != "" {
+				// If the ServiceEntry has no Addresses, map to a user-supplied default value, if provided
+				addresses = []string{vip}
+			} else {
+				// If there is no user-supplied default, give an address unique for this instance at this time
+				addresses = []string{fmt.Sprintf("127.255.%d.%d", (i>>8)&0xff, i&0xff)}
+			}
 		}
 
 		vips := convertToVIPs(addresses)
