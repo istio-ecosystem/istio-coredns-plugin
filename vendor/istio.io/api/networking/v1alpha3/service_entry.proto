@@ -134,15 +134,23 @@ option go_package = "istio.io/api/networking/v1alpha3";
 //
 // The following example demonstrates the use of a dedicated egress gateway
 // through which all external service traffic is forwarded.
+// The 'exportTo' field allows for control over the visibility of a service
+// declaration to other namespaces in the mesh. By default a service is exported
+// to all namespaces. The following example restricts the visibility to the
+// current namespace, represented by ".", so that it cannot be used by other
+// namespaces.
 //
 // ```yaml
 // apiVersion: networking.istio.io/v1alpha3
 // kind: ServiceEntry
 // metadata:
 //   name: external-svc-httpbin
+//   namespace : egress
 // spec:
 //   hosts:
 //   - httpbin.com
+//   exportTo:
+//   - "."
 //   location: MESH_EXTERNAL
 //   ports:
 //   - number: 80
@@ -158,6 +166,7 @@ option go_package = "istio.io/api/networking/v1alpha3";
 // kind: Gateway
 // metadata:
 //  name: istio-egressgateway
+//  namespace: egress
 // spec:
 //  selector:
 //    istio: egressgateway
@@ -172,16 +181,22 @@ option go_package = "istio.io/api/networking/v1alpha3";
 //
 // And the associated VirtualService to route from the sidecar to the
 // gateway service (istio-egressgateway.istio-system.svc.cluster.local), as
-// well as route from the gateway to the external service.
+// well as route from the gateway to the external service. Note that the
+// virtual service is exported to all namespaces enabling them to route traffic
+// through the gateway to the external service. Forcing traffic to go through
+// a managed middle proxy like this is a common practice.
 //
 // ```yaml
 // apiVersion: networking.istio.io/v1alpha3
 // kind: VirtualService
 // metadata:
 //   name: gateway-routing
+//   namespace: egress
 // spec:
 //   hosts:
 //   - httpbin.com
+//   exportTo:
+//   - *
 //   gateways:
 //   - mesh
 //   - istio-egressgateway
@@ -245,7 +260,7 @@ option go_package = "istio.io/api/networking/v1alpha3";
 //   - address: unix:///var/run/example/socket
 // ```
 //
-// For HTTP based services, it is possible to create a VirtualService
+// For HTTP-based services, it is possible to create a VirtualService
 // backed by multiple DNS addressable endpoints. In such a scenario, the
 // application can use the HTTP_PROXY environment variable to transparently
 // reroute API calls for the VirtualService to a chosen backend. For
@@ -264,7 +279,7 @@ option go_package = "istio.io/api/networking/v1alpha3";
 //   location: MESH_EXTERNAL
 //   ports:
 //   - number: 80
-//     name: https
+//     name: http
 //     protocol: HTTP
 //   resolution: DNS
 //   endpoints:
@@ -279,16 +294,43 @@ option go_package = "istio.io/api/networking/v1alpha3";
 //       https: 7080
 // ```
 //
-// With HTTP_PROXY=http://localhost/, calls from the application to
-// http://foo.bar.com will be load balanced across the three domains
-// specified above. In other words, a call to http://foo.bar.com/baz would
-// be translated to http://uk.foo.bar.com/baz.
+// With `HTTP_PROXY=http://localhost/`, calls from the application to
+// `http://foo.bar.com` will be load balanced across the three domains
+// specified above. In other words, a call to `http://foo.bar.com/baz` would
+// be translated to `http://uk.foo.bar.com/baz`.
+//
+// The following example illustrates the usage of a ServiceEntry
+// containing a subject alternate name
+// whose format conforms to the SPIFEE standard
+// <https://github.com/spiffe/spiffe/blob/master/standards/SPIFFE-ID.md>:
+//
+// ```yaml
+// apiVersion: networking.istio.io/v1alpha3
+// kind: ServiceEntry
+// metadata:
+//   name: httpbin
+//   namespace : httpbin-ns
+// spec:
+//   hosts:
+//   - httpbin.com
+//   location: MESH_INTERNAL
+//   ports:
+//   - number: 80
+//     name: http
+//     protocol: HTTP
+//   resolution: STATIC
+//   endpoints:
+//   - address: 2.2.2.2
+//   - address: 3.3.3.3
+//   subjectAltNames:
+//   - "spiffe://cluster.local/ns/httpbin-ns/sa/httpbin-service-account"
+// ```
 //
 message ServiceEntry {
   // REQUIRED. The hosts associated with the ServiceEntry. Could be a DNS
   // name with wildcard prefix (external services only). DNS names in hosts
   // will be ignored if the application accesses the service over non-HTTP
-  // protocols such as mongo/opaque TCP/even HTTPS. In such scenarios, the
+  // protocols such as mongo/opaque TCP/HTTPS. In such scenarios, the
   // IP addresses specified in the Addresses field or the port will be used
   // to uniquely identify the destination.
   repeated string hosts = 1;
@@ -296,7 +338,7 @@ message ServiceEntry {
   // The virtual IP addresses associated with the service. Could be CIDR
   // prefix. For HTTP services, the addresses field will be ignored and
   // the destination will be identified based on the HTTP Host/Authority
-  // header. For non-HTTP protocols such as mongo/opaque TCP/even HTTPS,
+  // header. For non-HTTP protocols such as mongo/opaque TCP/HTTPS,
   // the hosts will be ignored. If one or more IP addresses are specified,
   // the incoming traffic will be identified as belonging to this service
   // if the destination IP matches the IP/CIDRs specified in the addresses
@@ -370,7 +412,7 @@ message ServiceEntry {
 
   // REQUIRED: Service discovery mode for the hosts. Care must be taken
   // when setting the resolution mode to NONE for a TCP port without
-  // accompanying IP addresses. In such cases, traffic to any IP on 
+  // accompanying IP addresses. In such cases, traffic to any IP on
   // said port will be allowed (i.e. 0.0.0.0:<port>).
   Resolution resolution = 5;
 
@@ -419,8 +461,37 @@ message ServiceEntry {
     // (that bridges networks n1 and n2), or the IP associated with a
     // standard service endpoint.
     string locality = 5;
+
+    // The load balancing weight associated with the endpoint. Endpoints
+    // with higher weights will receive proportionally higher traffic.
+    uint32 weight = 6;
   };
 
   // One or more endpoints associated with the service.
   repeated Endpoint endpoints = 6;
+
+  // A list of namespaces to which this service is exported. Exporting a service
+  // allows it to used by sidecars, gateways and virtual services defined in
+  // other namespaces. This feature provides a mechanism for service owners
+  // and mesh administrators to control the visibility of services across
+  // namespace boundaries.
+  //
+  // If no namespaces are specified then the service is exported to all
+  // namespaces by default.
+  //
+  // The value "." is reserved and defines an export to the same namespace that
+  // the service is declared in, similarly the value "*" is reserved and
+  // defines an export to all namespaces.
+  //
+  // For a Kubernetes Service the equivalent effect can be achieved by setting
+  // the annotation "networking.istio.io/exportTo" to a comma-separated list
+  // of namespace names.
+  repeated string export_to = 7;
+
+  // The list of subject alternate names allowed for workloads that
+  // implement this service. This information is used to enforce
+  // secure-naming <https://istio.io/docs/concepts/security/#secure-naming>.
+  // If specified, the proxy will verify that the server
+  // certificate's subject alternate name matches one of the specified values.
+  repeated string subject_alt_names = 8;
 }
