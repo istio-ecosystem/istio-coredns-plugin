@@ -1,5 +1,3 @@
-# istio-coredns-plugin
-
 **UPDATE**: _This plugin is no longer necessary as of Istio 1.8. DNS is built into the istio agent in the sidecar. Sidecar DNS is enabled by default in the `preview` profile. You can also enable it manually by setting the following config in the istio operator_
 ```yaml
   meshConfig:
@@ -11,9 +9,9 @@
 
 **This repository is no longer maintained**.
 
-
-Intro
 ---
+
+# istio-coredns-plugin
 
 CoreDNS gRPC plugin to serve DNS records out of Istio ServiceEntries.
 
